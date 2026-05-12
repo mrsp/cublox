@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>cublox</name>
+  <version>0.0.1</version>
+  <description>
+    CUDA-accelerated version of 3D occupancy grid mapping.
+  </description>
+  <maintainer email="spiperakis@gmail.com">drsp</maintainer>
+  <license>LGPL-3.0-or-later</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>tf2_ros</depend>
+  <depend>eigen</depend>
+  <depend>yaml-cpp</depend>
+
+  <!-- CUDA toolkit. Rosdep on Ubuntu maps "cuda" to nvidia-cuda-toolkit;
+       we deliberately don't list it as <depend> because most users install
+       CUDA via NVIDIA's runfile/apt repo, not via rosdep. The CMakeLists
+       will fail loudly with a useful message if nvcc isn't found. -->
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
