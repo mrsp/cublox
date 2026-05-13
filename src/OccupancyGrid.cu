@@ -133,7 +133,11 @@ __global__ void applyUpdateKernel(float *__restrict__ occ,
                                   int *__restrict__ hit_cnt,
                                   const int voxel_num, const float l_hit,
                                   const float l_miss, const float l_min,
-                                  const float l_max) {
+                                  const float l_max,
+                                  unsigned int *__restrict__ dirty_count,
+                                  int *__restrict__ dirty_idx,
+                                  float *__restrict__ dirty_val,
+                                  const unsigned int dirty_capacity) {
   const int h = blockIdx.x * blockDim.x + threadIdx.x;
   if (h >= voxel_num) {
     return;
@@ -145,7 +149,8 @@ __global__ void applyUpdateKernel(float *__restrict__ occ,
   }
 
   const int hit = hit_cnt[h];
-  float v = occ[h];
+  const float v0 = occ[h];
+  float v = v0;
 
   if (hit > 0) {
     v += l_hit * static_cast<float>(hit);
@@ -164,6 +169,15 @@ __global__ void applyUpdateKernel(float *__restrict__ occ,
   occ[h] = v;
   op_cnt[h] = 0;
   hit_cnt[h] = 0;
+
+  if (dirty_count != nullptr && dirty_idx != nullptr &&
+      dirty_val != nullptr && v != v0) {
+    const unsigned int slot = atomicAdd(dirty_count, 1u);
+    if (slot < dirty_capacity) {
+      dirty_idx[slot] = h;
+      dirty_val[slot] = v;
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -192,15 +206,32 @@ void launchRayCastUpdate(const RayCastCfg &cfg, const float *d_cloud_x,
 
 void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
                        int voxel_num, float l_hit, float l_miss, float l_min,
-                       float l_max, cudaStream_t stream) {
+                       float l_max, cudaStream_t stream,
+                       unsigned int *d_dirty_count, int *d_dirty_idx,
+                       float *d_dirty_val, unsigned int dirty_capacity) {
   if (voxel_num <= 0) {
     return;
   }
 
   constexpr int kBlock = 256;
   const int grid = (voxel_num + kBlock - 1) / kBlock;
+
+  unsigned int *dc = nullptr;
+  int *di = nullptr;
+  float *dv = nullptr;
+  unsigned int cap = 0;
+  if (d_dirty_count != nullptr && d_dirty_idx != nullptr &&
+      d_dirty_val != nullptr &&
+      static_cast<unsigned int>(voxel_num) <= dirty_capacity) {
+    dc = d_dirty_count;
+    di = d_dirty_idx;
+    dv = d_dirty_val;
+    cap = dirty_capacity;
+  }
+
   applyUpdateKernel<<<grid, kBlock, 0, stream>>>(
-      d_occ, d_op_cnt, d_hit_cnt, voxel_num, l_hit, l_miss, l_min, l_max);
+      d_occ, d_op_cnt, d_hit_cnt, voxel_num, l_hit, l_miss, l_min, l_max, dc,
+      di, dv, cap);
 }
 
 } // namespace cublox

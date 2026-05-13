@@ -56,6 +56,14 @@ bool Grid::inside(const Eigen::Vector3i &id_g) const {
 }
 
 void Grid::recenter(const Eigen::Vector3f &pos) {
+  if (!config_.recenter_threshold.has_value()) {
+    return;
+  }
+
+  if ((pos - origin_d_).norm() < config_.recenter_threshold.value()) {
+    return;
+  }
+
   // Compute the shifting index
   Eigen::Vector3i new_origin_i;
   posToGlobalIndex(pos, config_.resolution_inv, config_.origin_at_center,

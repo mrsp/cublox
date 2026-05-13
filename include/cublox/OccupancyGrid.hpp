@@ -56,8 +56,12 @@ public:
   bool isOccupied(const Eigen::Vector3i &id_g) const;
   bool isUnknown(const Eigen::Vector3i &id_g) const;
   bool isKnownFree(const Eigen::Vector3i &id_g) const;
+  bool isOccupied(const int hash_id) const;
+  bool isUnknown(const int hash_id) const;
+  bool isKnownFree(const int hash_id) const;
 
 private:
+  bool first_run_{true};
   // Threshold separating occupied / free / unknown in the log-odds
   // buffer. `kOccThr == kFreeThr == 0` partitions on the sign of the
   // log-odds value (positive → occupied, negative → free, zero →
@@ -78,9 +82,17 @@ private:
   // config_.voxel_num > 0. Rolls back partial CUDA allocations on failure.
   void allocateVoxelBuffers_();
 
-  // Host-side mirror of d_occ_. Filled by a D2H copy at the end of
-  // each update()
+  // Host-side mirror of d_occ_. Updated incrementally from GPU dirty lists
+  // inside update() instead of copying the entire volume each frame.
   std::vector<float> occupancy_buffer_;
+
+  // GPU + host staging for voxels whose log-odds change in applyUpdateKernel.
+  // Capacity equals voxel_num (at most one list entry per voxel per frame).
+  unsigned int *d_dirty_count_{nullptr};
+  int *d_dirty_idx_{nullptr};
+  float *d_dirty_val_{nullptr};
+  std::vector<int> h_dirty_idx_;
+  std::vector<float> h_dirty_val_;
 
   // Per-voxel atomics buffers, allocated in the sized constructor.
   // Sized to config_.voxel_num once.

@@ -49,8 +49,17 @@ void launchRayCastUpdate(const RayCastCfg &cfg, const float *d_cloud_x,
 //
 // d_occ:    voxel_num floats, persistent log-odds buffer (UNKNOWN = 0).
 // d_op_cnt, d_hit_cnt: voxel_num ints, written by rayCastUpdateKernel.
+//
+// If `d_dirty_count` is non-null, voxels whose log-odds value changes are
+// appended as (dirty_idx[i], dirty_val[i]) with `dirty_capacity >= voxel_num`
+// (each voxel updates at most once per frame). `d_dirty_count` must be cleared
+// to 0 before this launch each frame.
 void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
                        int voxel_num, float l_hit, float l_miss, float l_min,
-                       float l_max, cudaStream_t stream);
+                       float l_max, cudaStream_t stream,
+                       unsigned int *d_dirty_count = nullptr,
+                       int *d_dirty_idx = nullptr,
+                       float *d_dirty_val = nullptr,
+                       unsigned int dirty_capacity = 0);
 
 } // namespace cublox

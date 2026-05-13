@@ -4,6 +4,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
@@ -76,6 +77,18 @@ OccupancyGrid::~OccupancyGrid() {
     cudaFree(d_cloud_z_);
     d_cloud_z_ = nullptr;
   }
+  if (d_dirty_val_) {
+    cudaFree(d_dirty_val_);
+    d_dirty_val_ = nullptr;
+  }
+  if (d_dirty_idx_) {
+    cudaFree(d_dirty_idx_);
+    d_dirty_idx_ = nullptr;
+  }
+  if (d_dirty_count_) {
+    cudaFree(d_dirty_count_);
+    d_dirty_count_ = nullptr;
+  }
 }
 
 void OccupancyGrid::reset() {
@@ -92,6 +105,9 @@ void OccupancyGrid::reset() {
   CUDA_OK(cudaMemset(d_occ_, 0, n * sizeof(float)));
   CUDA_OK(cudaMemset(d_op_cnt_, 0, n * sizeof(int)));
   CUDA_OK(cudaMemset(d_hit_cnt_, 0, n * sizeof(int)));
+  if (d_dirty_count_) {
+    CUDA_OK(cudaMemset(d_dirty_count_, 0, sizeof(unsigned int)));
+  }
 }
 
 void OccupancyGrid::resetVoxel(const int &hash_id) {
@@ -124,10 +140,28 @@ void OccupancyGrid::allocateVoxelBuffers_() {
     CUDA_OK(cudaMalloc(&d_op_cnt_, int_bytes));
     CUDA_OK(cudaMalloc(&d_hit_cnt_, int_bytes));
     CUDA_OK(cudaMalloc(&d_occ_, flt_bytes));
+    CUDA_OK(cudaMalloc(&d_dirty_count_, sizeof(unsigned int)));
+    CUDA_OK(cudaMalloc(&d_dirty_idx_, int_bytes));
+    CUDA_OK(cudaMalloc(&d_dirty_val_, flt_bytes));
     CUDA_OK(cudaMemset(d_op_cnt_, 0, int_bytes));
     CUDA_OK(cudaMemset(d_hit_cnt_, 0, int_bytes));
     CUDA_OK(cudaMemset(d_occ_, 0, flt_bytes));
+    CUDA_OK(cudaMemset(d_dirty_count_, 0, sizeof(unsigned int)));
+    h_dirty_idx_.resize(n);
+    h_dirty_val_.resize(n);
   } catch (...) {
+    if (d_dirty_val_) {
+      cudaFree(d_dirty_val_);
+      d_dirty_val_ = nullptr;
+    }
+    if (d_dirty_idx_) {
+      cudaFree(d_dirty_idx_);
+      d_dirty_idx_ = nullptr;
+    }
+    if (d_dirty_count_) {
+      cudaFree(d_dirty_count_);
+      d_dirty_count_ = nullptr;
+    }
     if (d_occ_) {
       cudaFree(d_occ_);
       d_occ_ = nullptr;
@@ -140,6 +174,8 @@ void OccupancyGrid::allocateVoxelBuffers_() {
       cudaFree(d_op_cnt_);
       d_op_cnt_ = nullptr;
     }
+    h_dirty_idx_.clear();
+    h_dirty_val_.clear();
     occupancy_buffer_.clear();
     throw;
   }
@@ -171,6 +207,16 @@ void OccupancyGrid::update(const PointCloud &cloud,
   const int n = static_cast<int>(cloud.rows());
   if (n <= 0) {
     return;
+  }
+
+  if (first_run_) {
+    if (config_.recenter_threshold) {
+      Eigen::Vector3i origin_i;
+      posToGlobalIndex(sensor_origin, config_.resolution_inv,
+                       config_.origin_at_center, origin_i);
+      updateOriginAndBound(sensor_origin, origin_i);
+    }
+    first_run_ = false;
   }
 
   ensureCloudCapacity_(n);
@@ -206,26 +252,38 @@ void OccupancyGrid::update(const PointCloud &cloud,
   launchRayCastUpdate(cfg, d_cloud_x_, d_cloud_y_, d_cloud_z_, n, d_op_cnt_,
                       d_hit_cnt_, /*stream=*/0);
 
-  // Pass 2: one thread per voxel; fold the counters into d_occ_ and
-  // zero them so the next frame can start clean. applyUpdateKernel
-  // depends on rayCastUpdateKernel's writes, but launching on the same
-  // (default) stream guarantees the dependency without an explicit
-  // event.
+  CUDA_OK(cudaMemsetAsync(d_dirty_count_, 0, sizeof(unsigned int),
+                          /*stream=*/0));
+
+  // Pass 2: fold counters into d_occ_; record voxels whose log-odds change.
   launchApplyUpdate(d_occ_, d_op_cnt_, d_hit_cnt_, config_.voxel_num, l_hit_,
-                    l_miss_, l_min_, l_max_, /*stream=*/0);
+                    l_miss_, l_min_, l_max_, /*stream=*/0, d_dirty_count_,
+                    d_dirty_idx_, d_dirty_val_,
+                    static_cast<unsigned int>(config_.voxel_num));
 
-  // Sync the host mirror so the public is*() queries see this frame's
-  // result. Full-buffer D2H every frame is the simplest thing that
-  // works; a dirty-flag / partial-sync scheme is a follow-up if this
-  // ever shows up in a profile.
-  const size_t occ_bytes =
-      static_cast<size_t>(config_.voxel_num) * sizeof(float);
-  CUDA_OK(cudaMemcpyAsync(occupancy_buffer_.data(), d_occ_, occ_bytes,
-                          cudaMemcpyDeviceToHost, /*stream=*/0));
-
-  // Block until everything above finishes so the caller can immediately
-  // read occupancy_buffer_ via the is*() helpers.
   CUDA_OK(cudaDeviceSynchronize());
+
+  unsigned int dirty_n = 0;
+  CUDA_OK(cudaMemcpy(&dirty_n, d_dirty_count_, sizeof(unsigned int),
+                     cudaMemcpyDeviceToHost));
+
+  dirty_n = std::min(dirty_n, static_cast<unsigned int>(config_.voxel_num));
+  if (dirty_n > 0) {
+    CUDA_OK(cudaMemcpy(h_dirty_idx_.data(), d_dirty_idx_,
+                       static_cast<size_t>(dirty_n) * sizeof(int),
+                       cudaMemcpyDeviceToHost));
+    CUDA_OK(cudaMemcpy(h_dirty_val_.data(), d_dirty_val_,
+                       static_cast<size_t>(dirty_n) * sizeof(float),
+                       cudaMemcpyDeviceToHost));
+
+    for (unsigned int i = 0U; i < dirty_n; ++i) {
+      const int hid = h_dirty_idx_[static_cast<size_t>(i)];
+      if (hid >= 0 && hid < config_.voxel_num) {
+        occupancy_buffer_[static_cast<size_t>(hid)] =
+            h_dirty_val_[static_cast<size_t>(i)];
+      }
+    }
+  }
 }
 
 // ─── public is*() queries ────────────────────────────────────────────────────
@@ -284,6 +342,18 @@ bool OccupancyGrid::isKnownFree(const Eigen::Vector3i &id_g) const {
 
   return isKnownFree(occupancy_buffer_[globalIndexToHashId(
       id_g, config_.map_size_i, config_.half_map_size_i)]);
+}
+
+bool OccupancyGrid::isOccupied(const int hash_id) const {
+  return isOccupied(occupancy_buffer_[hash_id]);
+}
+
+bool OccupancyGrid::isUnknown(const int hash_id) const {
+  return isUnknown(occupancy_buffer_[hash_id]);
+}
+
+bool OccupancyGrid::isKnownFree(const int hash_id) const {
+  return isKnownFree(occupancy_buffer_[hash_id]);
 }
 
 } // namespace cublox

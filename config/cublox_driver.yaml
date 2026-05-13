@@ -1,0 +1,29 @@
+# Pass this file via ROS param: config_file: <path>
+#
+# Frame used for markers and for interpreting odometry pose (typically "odom").
+map_frame: odom
+pointcloud_topic: /ouster/points
+odom_topic: /ground_truth/odom
+
+# Half-extent in voxels on each axis from the sliding window origin (see Grid docs).
+half_map_size:
+  - 100
+  - 100
+  - 50
+
+resolution: 0.1 # meters
+origin_at_center: false # false: origin is at the bottom-left corner of the map
+
+# Set to null or omit to disable recenter threshold behavior.
+recenter_threshold: 4.0 # meters
+
+max_raycast_range: 25.0 # meters
+
+# Static transform from base frame to lidar frame
+base_to_lidar:
+  translation: [0.0, 0.0, 0.0]
+  rotation:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+    w: 1.0

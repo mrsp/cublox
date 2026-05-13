@@ -34,12 +34,13 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wall>
 # Dependencies
 # ---------------------------------------------------------------------------
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
-find_package(tf2_ros REQUIRED)
-
+find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
@@ -51,9 +52,10 @@ find_package(CUDAToolkit REQUIRED)
 set(ros_deps
     rclcpp
     std_msgs
+    sensor_msgs
+    geometry_msgs
     nav_msgs
     visualization_msgs
-    tf2_ros
 )
 
 # ---------------------------------------------------------------------------
@@ -97,7 +99,9 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
 # Executables
 # ---------------------------------------------------------------------------
 add_executable(${PROJECT_NAME}_node src/main.cpp)
-target_link_libraries(${PROJECT_NAME}_node PRIVATE ${PROJECT_NAME})
+target_link_libraries(${PROJECT_NAME}_node ${PROJECT_NAME})
+ament_target_dependencies(${PROJECT_NAME}_node ${ros_deps}
+    ament_index_cpp)
 
 # ---------------------------------------------------------------------------
 # Install / export
@@ -113,6 +117,9 @@ install(TARGETS ${PROJECT_NAME}_node
 
 install(DIRECTORY include/
     DESTINATION include/)
+
+install(DIRECTORY config/
+    DESTINATION share/${PROJECT_NAME}/config)
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_include_directories(include)

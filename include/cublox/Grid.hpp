@@ -23,6 +23,9 @@ public:
                             const Eigen::Vector3i &new_origin_i);
   void recenter(const Eigen::Vector3f &pos);
 
+  Eigen::Vector3i getOriginIndex() const { return origin_i_; }
+  Eigen::Vector3f getOriginPosition() const { return origin_d_; }
+
   struct Config {
     float resolution{0.0};
     float resolution_inv{0.0};
