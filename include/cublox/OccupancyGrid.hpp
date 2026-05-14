@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <cuda_runtime.h>
 #include <vector>
 
 #include <cublox/Grid.hpp>
@@ -28,6 +29,10 @@ public:
   // be implemented once the occupancy buffer lifecycle is wired up.
   void reset() override;
   void resetVoxel(const int &hash_id) override;
+  void resetVoxels(const std::vector<int> &hash_ids) override;
+  void clearRecenterExitSlabs(const std::vector<int> &x_slices,
+                              const std::vector<int> &y_slices,
+                              const std::vector<int> &z_slices) override;
 
   // Run one raycast pass for `input_cloud` originating at `sensor_origin`.
   void update(const PointCloud &input_cloud,
@@ -103,6 +108,13 @@ private:
   // length as occupancy_buffer_. applyUpdateKernel reads/writes this
   // every frame.
   float *d_occ_{nullptr};
+
+  // Recenter: one stream + small slice-ID buffer per axis so x/y/z slab
+  // kernels can run concurrently (overlapping execution after H2D).
+  cudaStream_t recenter_stream_[3]{nullptr, nullptr, nullptr};
+  int *d_recenter_slices_[3]{nullptr, nullptr, nullptr};
+  // Page-locked host staging for slice IDs (true async cudaMemcpyAsync H2D).
+  int *h_recenter_slices_pin_[3]{nullptr, nullptr, nullptr};
 
   // SoA device-side mirror of the input cloud. Reused across frames;
   // grown by ensureCloudCapacity_ on demand.

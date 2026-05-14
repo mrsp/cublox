@@ -3,10 +3,13 @@
 #include <cublox/utils.hpp>
 
 #include <cuda_runtime.h>
+#include <vector_types.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -35,6 +38,63 @@ inline void cudaCheck(cudaError_t err, const char *expr, const char *file,
 }
 
 #define CUDA_OK(call) ::cublox::cudaCheck((call), #call, __FILE__, __LINE__)
+
+// Loose upper bound on slab voxel touches (double-counts corners). Chooses
+// between targeted host writes and full-volume D2H after GPU slab clear.
+size_t upperBoundSlabTouches(const Grid::Config &cfg,
+                             const std::vector<int> &x_slices,
+                             const std::vector<int> &y_slices,
+                             const std::vector<int> &z_slices) {
+  size_t v = 0;
+  if (!x_slices.empty()) {
+    v += x_slices.size() * static_cast<size_t>(cfg.map_size_i.y()) *
+         static_cast<size_t>(cfg.map_size_i.z());
+  }
+  if (!y_slices.empty()) {
+    v += y_slices.size() * static_cast<size_t>(cfg.map_size_i.x()) *
+         static_cast<size_t>(cfg.map_size_i.z());
+  }
+  if (!z_slices.empty()) {
+    v += z_slices.size() * static_cast<size_t>(cfg.map_size_i.x()) *
+         static_cast<size_t>(cfg.map_size_i.y());
+  }
+  return v;
+}
+
+// Same slab geometry as Grid sliding-window clear; host mirror only.
+// Device slabs were cleared via launchClearRecenterSlabsForAxis.
+void zeroHostMirrorSlabs(std::vector<float> &occ, const Grid::Config &cfg,
+                         const std::vector<int> &x_slices,
+                         const std::vector<int> &y_slices,
+                         const std::vector<int> &z_slices) {
+  const size_t bufsz = occ.size();
+  auto per_axis = [&](const std::vector<int> &slices, int axis) {
+    if (slices.empty()) {
+      return;
+    }
+    const std::array<int, 3> ids{axis, (axis + 1) % 3, (axis + 2) % 3};
+    const int h1 = cfg.half_map_size_i(ids[1]);
+    const int h2 = cfg.half_map_size_i(ids[2]);
+    for (const int idd : slices) {
+      for (int a = -h1; a <= h1; ++a) {
+        for (int b = -h2; b <= h2; ++b) {
+          Eigen::Vector3i tl;
+          tl(ids[0]) = idd;
+          tl(ids[1]) = a;
+          tl(ids[2]) = b;
+          const int h =
+              localIndexToHashId(tl, cfg.map_size_i, cfg.half_map_size_i);
+          if (h >= 0 && static_cast<size_t>(h) < bufsz) {
+            occ[static_cast<size_t>(h)] = 0.0f;
+          }
+        }
+      }
+    }
+  };
+  per_axis(x_slices, 0);
+  per_axis(y_slices, 1);
+  per_axis(z_slices, 2);
+}
 
 } // namespace
 
@@ -89,6 +149,20 @@ OccupancyGrid::~OccupancyGrid() {
     cudaFree(d_dirty_count_);
     d_dirty_count_ = nullptr;
   }
+  for (int a = 0; a < 3; ++a) {
+    if (recenter_stream_[a] != nullptr) {
+      cudaStreamDestroy(recenter_stream_[a]);
+      recenter_stream_[a] = nullptr;
+    }
+    if (d_recenter_slices_[a] != nullptr) {
+      cudaFree(d_recenter_slices_[a]);
+      d_recenter_slices_[a] = nullptr;
+    }
+    if (h_recenter_slices_pin_[a] != nullptr) {
+      cudaFreeHost(h_recenter_slices_pin_[a]);
+      h_recenter_slices_pin_[a] = nullptr;
+    }
+  }
 }
 
 void OccupancyGrid::reset() {
@@ -116,12 +190,93 @@ void OccupancyGrid::resetVoxel(const int &hash_id) {
   }
   occupancy_buffer_[hash_id] = 0.0f;
 
-  // Mirror the single-voxel clear to the device buffer if it exists.
-  // A single-voxel cudaMemset is wasteful but resetVoxel is called
-  // rarely (only by map-sliding clearVoxelsOutOfGrid for now); a
-  // batched clear API can replace this once sliding is GPU-side.
   if (d_occ_ != nullptr) {
     CUDA_OK(cudaMemset(d_occ_ + hash_id, 0, sizeof(float)));
+  }
+}
+
+void OccupancyGrid::resetVoxels(const std::vector<int> &hash_ids) {
+  if (hash_ids.empty()) {
+    return;
+  }
+  const size_t buf_sz = occupancy_buffer_.size();
+  for (int h : hash_ids) {
+    if (h >= 0 && static_cast<size_t>(h) < buf_sz) {
+      occupancy_buffer_[static_cast<size_t>(h)] = 0.0f;
+    }
+  }
+
+  if (d_occ_ == nullptr) {
+    return;
+  }
+
+  const int cap = config_.voxel_num;
+  const int total = static_cast<int>(hash_ids.size());
+  int offset = 0;
+  while (offset < total) {
+    const int chunk = std::min(cap, total - offset);
+    CUDA_OK(cudaMemcpy(d_dirty_idx_, hash_ids.data() + offset,
+                       static_cast<size_t>(chunk) * sizeof(int),
+                       cudaMemcpyHostToDevice));
+    launchClearVoxelsByIndex(d_occ_, d_dirty_idx_, chunk, cap, /*stream=*/0);
+    offset += chunk;
+  }
+  CUDA_OK(cudaDeviceSynchronize());
+}
+
+void OccupancyGrid::clearRecenterExitSlabs(const std::vector<int> &x_slices,
+                                           const std::vector<int> &y_slices,
+                                           const std::vector<int> &z_slices) {
+  const bool any = !x_slices.empty() || !y_slices.empty() || !z_slices.empty();
+  if (!any) {
+    return;
+  }
+
+  if (d_occ_ == nullptr || d_recenter_slices_[0] == nullptr ||
+      h_recenter_slices_pin_[0] == nullptr) {
+    Grid::clearRecenterExitSlabs(x_slices, y_slices, z_slices);
+    return;
+  }
+
+  const int3 ms = make_int3(config_.map_size_i.x(), config_.map_size_i.y(),
+                            config_.map_size_i.z());
+  const int3 hs =
+      make_int3(config_.half_map_size_i.x(), config_.half_map_size_i.y(),
+                config_.half_map_size_i.z());
+
+  auto issue = [&](const std::vector<int> &slices, int axis) {
+    if (slices.empty()) {
+      return;
+    }
+    const int n = static_cast<int>(slices.size());
+    cudaStream_t st = recenter_stream_[axis];
+    std::memcpy(h_recenter_slices_pin_[axis], slices.data(),
+                static_cast<size_t>(n) * sizeof(int));
+    CUDA_OK(cudaMemcpyAsync(
+        d_recenter_slices_[axis], h_recenter_slices_pin_[axis],
+        static_cast<size_t>(n) * sizeof(int), cudaMemcpyHostToDevice, st));
+    launchClearRecenterSlabsForAxis(d_occ_, ms, hs, d_recenter_slices_[axis], n,
+                                    axis, st);
+  };
+
+  issue(x_slices, 0);
+  issue(y_slices, 1);
+  issue(z_slices, 2);
+  CUDA_OK(cudaDeviceSynchronize());
+
+  // Full map is ~4e8 B for your default YAML; D2H that every recenter costs
+  // tens of ms. Unsynced host mirror only needs zeros on exiting slabs.
+  const size_t slab_ub =
+      upperBoundSlabTouches(config_, x_slices, y_slices, z_slices);
+  const size_t d2h_threshold =
+      static_cast<size_t>(std::max(1, config_.voxel_num)) / 4;
+  if (slab_ub <= d2h_threshold) {
+    zeroHostMirrorSlabs(occupancy_buffer_, config_, x_slices, y_slices,
+                        z_slices);
+  } else {
+    CUDA_OK(cudaMemcpy(occupancy_buffer_.data(), d_occ_,
+                       static_cast<size_t>(config_.voxel_num) * sizeof(float),
+                       cudaMemcpyDeviceToHost));
   }
 }
 
@@ -149,7 +304,28 @@ void OccupancyGrid::allocateVoxelBuffers_() {
     CUDA_OK(cudaMemset(d_dirty_count_, 0, sizeof(unsigned int)));
     h_dirty_idx_.resize(n);
     h_dirty_val_.resize(n);
+    for (int a = 0; a < 3; ++a) {
+      CUDA_OK(cudaStreamCreate(&recenter_stream_[a]));
+      const size_t slice_bytes =
+          static_cast<size_t>(config_.map_size_i(a)) * sizeof(int);
+      CUDA_OK(cudaMalloc(&d_recenter_slices_[a], slice_bytes));
+      CUDA_OK(cudaMallocHost(&h_recenter_slices_pin_[a], slice_bytes));
+    }
   } catch (...) {
+    for (int a = 0; a < 3; ++a) {
+      if (h_recenter_slices_pin_[a] != nullptr) {
+        cudaFreeHost(h_recenter_slices_pin_[a]);
+        h_recenter_slices_pin_[a] = nullptr;
+      }
+      if (d_recenter_slices_[a] != nullptr) {
+        cudaFree(d_recenter_slices_[a]);
+        d_recenter_slices_[a] = nullptr;
+      }
+      if (recenter_stream_[a] != nullptr) {
+        cudaStreamDestroy(recenter_stream_[a]);
+        recenter_stream_[a] = nullptr;
+      }
+    }
     if (d_dirty_val_) {
       cudaFree(d_dirty_val_);
       d_dirty_val_ = nullptr;

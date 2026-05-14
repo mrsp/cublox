@@ -2,28 +2,28 @@
 #
 # Frame used for markers and for interpreting odometry pose (typically "odom").
 map_frame: odom
-pointcloud_topic: /ouster/points
-odom_topic: /ground_truth/odom
+pointcloud_topic: /pandar_points
+odom_topic: /applanix/lvx_client/odom
 
 # Half-extent in voxels on each axis from the sliding window origin (see Grid docs).
 half_map_size:
-  - 100
-  - 100
+  - 500
+  - 500
   - 50
 
 resolution: 0.1 # meters
 origin_at_center: false # false: origin is at the bottom-left corner of the map
 
 # Set to null or omit to disable recenter threshold behavior.
-recenter_threshold: 4.0 # meters
+recenter_threshold: 5.0 # meters
 
 max_raycast_range: 25.0 # meters
 
 # Static transform from base frame to lidar frame
 base_to_lidar:
-  translation: [0.0, 0.0, 0.0]
+  translation: [0.98837, -0.06666, -1.37611]
   rotation:
     x: 0.0
     y: 0.0
-    z: 0.0
-    w: 1.0
+    z: 0.99987200
+    w: 0.01599934

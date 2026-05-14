@@ -128,16 +128,13 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
 // TODO: detect from→to GridType jumps and emit jump events for the
 // inflation map kernel (see Tier 1 item 5 in the porting plan).
 // ─────────────────────────────────────────────────
-__global__ void applyUpdateKernel(float *__restrict__ occ,
-                                  int *__restrict__ op_cnt,
-                                  int *__restrict__ hit_cnt,
-                                  const int voxel_num, const float l_hit,
-                                  const float l_miss, const float l_min,
-                                  const float l_max,
-                                  unsigned int *__restrict__ dirty_count,
-                                  int *__restrict__ dirty_idx,
-                                  float *__restrict__ dirty_val,
-                                  const unsigned int dirty_capacity) {
+__global__ void
+applyUpdateKernel(float *__restrict__ occ, int *__restrict__ op_cnt,
+                  int *__restrict__ hit_cnt, const int voxel_num,
+                  const float l_hit, const float l_miss, const float l_min,
+                  const float l_max, unsigned int *__restrict__ dirty_count,
+                  int *__restrict__ dirty_idx, float *__restrict__ dirty_val,
+                  const unsigned int dirty_capacity) {
   const int h = blockIdx.x * blockDim.x + threadIdx.x;
   if (h >= voxel_num) {
     return;
@@ -170,8 +167,8 @@ __global__ void applyUpdateKernel(float *__restrict__ occ,
   op_cnt[h] = 0;
   hit_cnt[h] = 0;
 
-  if (dirty_count != nullptr && dirty_idx != nullptr &&
-      dirty_val != nullptr && v != v0) {
+  if (dirty_count != nullptr && dirty_idx != nullptr && dirty_val != nullptr &&
+      v != v0) {
     const unsigned int slot = atomicAdd(dirty_count, 1u);
     if (slot < dirty_capacity) {
       dirty_idx[slot] = h;
@@ -229,9 +226,138 @@ void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
     cap = dirty_capacity;
   }
 
-  applyUpdateKernel<<<grid, kBlock, 0, stream>>>(
-      d_occ, d_op_cnt, d_hit_cnt, voxel_num, l_hit, l_miss, l_min, l_max, dc,
-      di, dv, cap);
+  applyUpdateKernel<<<grid, kBlock, 0, stream>>>(d_occ, d_op_cnt, d_hit_cnt,
+                                                 voxel_num, l_hit, l_miss,
+                                                 l_min, l_max, dc, di, dv, cap);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// clearVoxelsByIndexKernel — map sliding: clear many scattered voxels in
+// one launch (avoids one cudaMemset per voxel).
+// ─────────────────────────────────────────────────────────────────────
+__global__ void clearVoxelsByIndexKernel(float *__restrict__ occ,
+                                         const int *__restrict__ indices,
+                                         const int n, const int voxel_num) {
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid >= n) {
+    return;
+  }
+  const int h = indices[tid];
+  if (h >= 0 && h < voxel_num) {
+    occ[h] = 0.0f;
+  }
+}
+
+void launchClearVoxelsByIndex(float *d_occ, const int *d_indices, int n,
+                              int voxel_num, cudaStream_t stream) {
+  if (n <= 0 || d_occ == nullptr || d_indices == nullptr) {
+    return;
+  }
+
+  constexpr int kBlock = 256;
+  const int grid_dim = (n + kBlock - 1) / kBlock;
+  clearVoxelsByIndexKernel<<<grid_dim, kBlock, 0, stream>>>(d_occ, d_indices, n,
+                                                            voxel_num);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Recenter slab clear — one thread per row along fastest (z) or strided
+// (y) index so inner loops touch contiguous / regular d_occ[] addresses.
+// ─────────────────────────────────────────────────────────────────────
+__global__ void clearRecenterSlabAxis0Kernel(
+    float *__restrict__ occ, int3 ms, int3 hs, const int *__restrict__ d_vals,
+    int n_slices) {
+  const int ny = ms.y;
+  const int nz = ms.z;
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int n_rows = n_slices * ny;
+  if (tid >= n_rows) {
+    return;
+  }
+  const int si = tid / ny;
+  const int iy_raw = tid % ny;
+  const int lx = d_vals[si];
+  const int ly = iy_raw - hs.y;
+  const int3 il0 = make_int3(lx, ly, -hs.z);
+  int h = localIndexToHashId(il0, ms, hs);
+  for (int k = 0; k < nz; ++k) {
+    occ[h] = 0.0f;
+    ++h;
+  }
+}
+
+__global__ void clearRecenterSlabAxis1Kernel(
+    float *__restrict__ occ, int3 ms, int3 hs, const int *__restrict__ d_vals,
+    int n_slices) {
+  const int nx = ms.x;
+  const int nz = ms.z;
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int n_rows = n_slices * nx;
+  if (tid >= n_rows) {
+    return;
+  }
+  const int si = tid / nx;
+  const int ix_raw = tid % nx;
+  const int lx = ix_raw - hs.x;
+  const int ly = d_vals[si];
+  const int3 il0 = make_int3(lx, ly, -hs.z);
+  int h = localIndexToHashId(il0, ms, hs);
+  for (int k = 0; k < nz; ++k) {
+    occ[h] = 0.0f;
+    ++h;
+  }
+}
+
+__global__ void clearRecenterSlabAxis2Kernel(
+    float *__restrict__ occ, int3 ms, int3 hs, const int *__restrict__ d_vals,
+    int n_slices) {
+  const int nx = ms.x;
+  const int ny = ms.y;
+  const int nz = ms.z;
+  const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+  const int n_rows = n_slices * nx;
+  if (tid >= n_rows) {
+    return;
+  }
+  const int si = tid / nx;
+  const int ix_raw = tid % nx;
+  const int lx = ix_raw - hs.x;
+  const int lz = d_vals[si];
+  const int3 il0 = make_int3(lx, -hs.y, lz);
+  int h = localIndexToHashId(il0, ms, hs);
+  for (int k = 0; k < ny; ++k) {
+    occ[h] = 0.0f;
+    h += nz;
+  }
+}
+
+void launchClearRecenterSlabsForAxis(float *d_occ, int3 map_size_i,
+                                     int3 half_map_size_i,
+                                     const int *d_slice_local_values,
+                                     int n_slices, int axis, cudaStream_t stream) {
+  if (n_slices <= 0 || d_occ == nullptr || d_slice_local_values == nullptr) {
+    return;
+  }
+  constexpr int kBlock = 256;
+  int n_threads = 0;
+  if (axis == 0) {
+    n_threads = n_slices * map_size_i.y;
+  } else if (axis == 1) {
+    n_threads = n_slices * map_size_i.x;
+  } else {
+    n_threads = n_slices * map_size_i.x;
+  }
+  const int grid_dim = (n_threads + kBlock - 1) / kBlock;
+  if (axis == 0) {
+    clearRecenterSlabAxis0Kernel<<<grid_dim, kBlock, 0, stream>>>(
+        d_occ, map_size_i, half_map_size_i, d_slice_local_values, n_slices);
+  } else if (axis == 1) {
+    clearRecenterSlabAxis1Kernel<<<grid_dim, kBlock, 0, stream>>>(
+        d_occ, map_size_i, half_map_size_i, d_slice_local_values, n_slices);
+  } else {
+    clearRecenterSlabAxis2Kernel<<<grid_dim, kBlock, 0, stream>>>(
+        d_occ, map_size_i, half_map_size_i, d_slice_local_values, n_slices);
+  }
 }
 
 } // namespace cublox

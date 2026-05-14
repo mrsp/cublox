@@ -1,6 +1,7 @@
 #include <cublox/Grid.hpp>
 #include <cublox/utils.hpp>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -8,8 +9,35 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace cublox {
+
+namespace {
+
+void appendSlabHashes(std::vector<int> &hash_batch, const Grid::Config &cfg,
+                      const std::vector<int> &clear_id, int axis) {
+  const std::array<int, 3> ids{axis, (axis + 1) % 3, (axis + 2) % 3};
+  const int h1 = cfg.half_map_size_i(ids[1]);
+  const int h2 = cfg.half_map_size_i(ids[2]);
+  hash_batch.reserve(hash_batch.size() + static_cast<size_t>(clear_id.size()) *
+                                             static_cast<size_t>(2 * h1 + 1) *
+                                             static_cast<size_t>(2 * h2 + 1));
+  for (const int idd : clear_id) {
+    for (int x = -h1; x <= h1; x++) {
+      for (int y = -h2; y <= h2; y++) {
+        Eigen::Vector3i temp_clear_id;
+        temp_clear_id(ids[0]) = idd;
+        temp_clear_id(ids[1]) = x;
+        temp_clear_id(ids[2]) = y;
+        hash_batch.push_back(localIndexToHashId(temp_clear_id, cfg.map_size_i,
+                                                cfg.half_map_size_i));
+      }
+    }
+  }
+}
+
+} // namespace
 
 Grid::Grid(const Eigen::Vector3i &half_map_size_i, const float resolution,
            const std::optional<double> recenter_threshold,
@@ -60,7 +88,8 @@ void Grid::recenter(const Eigen::Vector3f &pos) {
     return;
   }
 
-  if ((pos - origin_d_).norm() < config_.recenter_threshold.value()) {
+  const float thresh = static_cast<float>(config_.recenter_threshold.value());
+  if ((pos - origin_d_).squaredNorm() < thresh * thresh) {
     return;
   }
 
@@ -75,6 +104,7 @@ void Grid::recenter(const Eigen::Vector3f &pos) {
   Eigen::Vector3i shift_num = new_origin_i - origin_i_;
   if (shift_num.cwiseAbs().maxCoeff() > config_.map_size_i.maxCoeff()) {
     // Clear the map
+    std::cout << "Resetting map" << std::endl;
     reset();
     updateOriginAndBound(new_origin_d, new_origin_i);
     return;
@@ -86,7 +116,7 @@ void Grid::recenter(const Eigen::Vector3f &pos) {
     return (y < 0 ? y + range : y) + a;
   };
 
-  // Clear the memory out of the map size
+  std::vector<int> x_slices, y_slices, z_slices;
   for (int i = 0; i < 3; i++) {
     if (shift_num(i) == 0) {
       continue;
@@ -116,29 +146,44 @@ void Grid::recenter(const Eigen::Vector3f &pos) {
     if (clear_id.empty()) {
       continue;
     }
-    clearVoxelsOutOfGrid(clear_id, i);
+
+    if (i == 0) {
+      x_slices = std::move(clear_id);
+    } else if (i == 1) {
+      y_slices = std::move(clear_id);
+    } else {
+      z_slices = std::move(clear_id);
+    }
   }
+
+  clearRecenterExitSlabs(x_slices, y_slices, z_slices);
 
   updateOriginAndBound(new_origin_d, new_origin_i);
 }
 
+void Grid::clearRecenterExitSlabs(const std::vector<int> &x_slices,
+                                  const std::vector<int> &y_slices,
+                                  const std::vector<int> &z_slices) {
+  std::vector<int> hash_batch_total;
+  if (!x_slices.empty()) {
+    appendSlabHashes(hash_batch_total, config_, x_slices, 0);
+  }
+  if (!y_slices.empty()) {
+    appendSlabHashes(hash_batch_total, config_, y_slices, 1);
+  }
+  if (!z_slices.empty()) {
+    appendSlabHashes(hash_batch_total, config_, z_slices, 2);
+  }
+  if (!hash_batch_total.empty()) {
+    resetVoxels(hash_batch_total);
+  }
+}
+
 void Grid::clearVoxelsOutOfGrid(const std::vector<int> &clear_id,
                                 const int &i) {
-  std::vector<int> ids{i, (i + 1) % 3, (i + 2) % 3};
-  for (const auto &idd : clear_id) {
-    for (int x = -config_.half_map_size_i(ids[1]);
-         x <= config_.half_map_size_i(ids[1]); x++) {
-      for (int y = -config_.half_map_size_i(ids[2]);
-           y <= config_.half_map_size_i(ids[2]); y++) {
-        Eigen::Vector3i temp_clear_id;
-        temp_clear_id(ids[0]) = idd;
-        temp_clear_id(ids[1]) = x;
-        temp_clear_id(ids[2]) = y;
-        resetVoxel(localIndexToHashId(temp_clear_id, config_.map_size_i,
-                                      config_.half_map_size_i));
-      }
-    }
-  }
+  std::vector<int> hash_batch;
+  appendSlabHashes(hash_batch, config_, clear_id, i);
+  resetVoxels(hash_batch);
 }
 
 void Grid::updateOriginAndBound(const Eigen::Vector3f &new_origin_d,
@@ -154,6 +199,12 @@ void Grid::updateOriginAndBound(const Eigen::Vector3f &new_origin_d,
                    bound_min_d_);
   globalIndexToPos(bound_max_i_, config_.resolution, config_.origin_at_center,
                    bound_max_d_);
+}
+
+void Grid::resetVoxels(const std::vector<int> &hash_ids) {
+  for (const int h : hash_ids) {
+    resetVoxel(h);
+  }
 }
 
 Grid::~Grid() {}

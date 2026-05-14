@@ -4,6 +4,7 @@
 #include <yaml-cpp/yaml.h>
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -260,9 +261,6 @@ public:
       return;
     }
 
-    RCLCPP_INFO(get_logger(), "Building cloud in odom frame");
-    RCLCPP_INFO(get_logger(), "Cloud size: %ld", pts.rows());
-
     const Eigen::Vector3f robot_pos(
         static_cast<float>(odom->pose.pose.position.x),
         static_cast<float>(odom->pose.pose.position.y),
@@ -270,10 +268,19 @@ public:
 
     {
       std::lock_guard<std::mutex> grid_lock(grid_mutex_);
+      const auto t0 = std::chrono::steady_clock::now();
       grid_->update(pts, robot_pos);
+      const auto t1 = std::chrono::steady_clock::now();
       grid_->recenter(robot_pos);
+      const auto t2 = std::chrono::steady_clock::now();
+      const double update_ms =
+          std::chrono::duration<double, std::milli>(t1 - t0).count();
+      const double recenter_ms =
+          std::chrono::duration<double, std::milli>(t2 - t1).count();
+      RCLCPP_INFO(get_logger(),
+                  "grid update: %.3f ms, recenter: %.3f ms (total %.3f ms)",
+                  update_ms, recenter_ms, update_ms + recenter_ms);
     }
-    RCLCPP_INFO(get_logger(), "Occupancy grid updated");
 
     {
       std::lock_guard<std::mutex> lk(publish_mutex_);
@@ -371,22 +378,24 @@ private:
       publish_lock.unlock();
 
       // Publish latest pose consumed
-      if (latest_odom) {
-        odom_pub_->publish(*latest_odom);
+      if (!latest_odom) {
+        return;
       }
 
-      if (latest_odom) {
-        path_out.header.frame_id = map_frame_;
-        path_out.header.stamp = latest_odom->header.stamp;
-        path_pub_->publish(path_out);
-      }
-
+      odom_pub_->publish(*latest_odom);
+      path_out.header.frame_id = map_frame_;
+      path_out.header.stamp = latest_odom->header.stamp;
+      path_pub_->publish(path_out);
+      const Eigen::Vector3f latest_pos = Eigen::Vector3f(
+          static_cast<float>(latest_odom->pose.pose.position.x),
+          static_cast<float>(latest_odom->pose.pose.position.y),
+          static_cast<float>(latest_odom->pose.pose.position.z));
       std::lock_guard<std::mutex> grid_lock(grid_mutex_);
-      publishOccupancyMarkersLocked();
+      publishOccupancyMarkersLocked(latest_pos);
     }
   }
 
-  void publishOccupancyMarkersLocked() {
+  void publishOccupancyMarkersLocked(const Eigen::Vector3f &latest_pos) {
     visualization_msgs::msg::MarkerArray arr;
     visualization_msgs::msg::Marker del;
     del.header.frame_id = map_frame_;
@@ -408,11 +417,7 @@ private:
     cubes.scale.z = grid_->config_.resolution;
 
     const int nv = grid_->config_.voxel_num;
-    std_msgs::msg::ColorRGBA black;
-    black.r = 0.0f;
-    black.g = 0.0f;
-    black.b = 0.0f;
-    black.a = 1.0f;
+    std_msgs::msg::ColorRGBA c;
     cubes.points.reserve(static_cast<size_t>(nv));
     cubes.colors.reserve(static_cast<size_t>(nv));
     for (int hid = 0; hid < nv; ++hid) {
@@ -426,7 +431,24 @@ private:
                           grid_->getOriginIndex(), grid_->config_.resolution,
                           grid_->config_.origin_at_center, pos);
       cubes.points.push_back(eigenToPoint(pos));
-      cubes.colors.push_back(black);
+
+      // Palette vs distance (meters): far → red, mid → blue, near → green.
+      const float d = (pos - latest_pos).norm();
+      const float d_max = std::max(grid_->getMaxRaycastRange(), 1.0f);
+      const float t = std::clamp(d / d_max, 0.0f, 1.0f);
+      if (t <= 0.5f) {
+        const float k = t * 2.0f; // green → blue
+        c.r = 0.0f;
+        c.g = 1.0f - k;
+        c.b = k;
+      } else {
+        const float k = (t - 0.5f) * 2.0f; // blue → red
+        c.r = k;
+        c.g = 0.0f;
+        c.b = 1.0f - k;
+      }
+      c.a = 1.0f;
+      cubes.colors.push_back(c);
     }
 
     arr.markers.push_back(cubes);
@@ -455,8 +477,11 @@ private:
   std::atomic<bool> shutdown_{false};
   std::thread publish_thread_;
 
+  // ROS Subscribers
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+
+  // ROS Publishers
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
       marker_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;

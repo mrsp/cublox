@@ -16,12 +16,20 @@ public:
 
   virtual void reset() = 0;
   virtual void resetVoxel(const int &hash_id) = 0;
+  virtual void resetVoxels(const std::vector<int> &hash_ids);
   bool inside(const Eigen::Vector3f &pos) const;
   bool inside(const Eigen::Vector3i &id_g) const;
   void clearVoxelsOutOfGrid(const std::vector<int> &clear_id, const int &i);
   void updateOriginAndBound(const Eigen::Vector3f &new_origin_d,
                             const Eigen::Vector3i &new_origin_i);
   void recenter(const Eigen::Vector3f &pos);
+
+  // After a sliding-window recenter: zero voxels on exiting slabs. Default
+  // expands slabs to hash IDs on the CPU; OccupancyGrid overrides with a GPU
+  // mask sweep (see clearRecenterExitSlabs there).
+  virtual void clearRecenterExitSlabs(const std::vector<int> &x_slices,
+                                      const std::vector<int> &y_slices,
+                                      const std::vector<int> &z_slices);
 
   Eigen::Vector3i getOriginIndex() const { return origin_i_; }
   Eigen::Vector3f getOriginPosition() const { return origin_d_; }

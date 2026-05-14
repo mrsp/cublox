@@ -58,8 +58,19 @@ void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
                        int voxel_num, float l_hit, float l_miss, float l_min,
                        float l_max, cudaStream_t stream,
                        unsigned int *d_dirty_count = nullptr,
-                       int *d_dirty_idx = nullptr,
-                       float *d_dirty_val = nullptr,
+                       int *d_dirty_idx = nullptr, float *d_dirty_val = nullptr,
                        unsigned int dirty_capacity = 0);
+
+// Zero `d_occ[h]` for each index in `d_indices[0..n-1]` (one CUDA launch).
+void launchClearVoxelsByIndex(float *d_occ, const int *d_indices, int n,
+                              int voxel_num, cudaStream_t stream);
+
+// Recenter: clear exiting axis-aligned slabs on GPU. One thread per row;
+// inner loop uses contiguous d_occ indices (++h or h += nz) for bandwidth.
+void launchClearRecenterSlabsForAxis(float *d_occ, int3 map_size_i,
+                                     int3 half_map_size_i,
+                                     const int *d_slice_local_values,
+                                     int n_slices, int axis,
+                                     cudaStream_t stream);
 
 } // namespace cublox
