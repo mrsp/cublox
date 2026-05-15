@@ -4,7 +4,6 @@ project(cublox LANGUAGES CXX CUDA)
 # ---------------------------------------------------------------------------
 # Language / build flags
 # ---------------------------------------------------------------------------
-# Match cublox: C++17, -O3, -fPIC. CUDA dialect tracks C++.
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
@@ -61,9 +60,6 @@ set(ros_deps
 # ---------------------------------------------------------------------------
 # Library target
 # ---------------------------------------------------------------------------
-# Glob is fine for a fast-iterating port; CONFIGURE_DEPENDS makes CMake
-# re-run when files appear/disappear. Anything under src/exe/ is treated as
-# executable-only (its own main()) and kept out of the library.
 file(GLOB_RECURSE cublox_cpp_srcs CONFIGURE_DEPENDS
     src/*.cpp)
 file(GLOB_RECURSE cublox_cuda_srcs CONFIGURE_DEPENDS

@@ -1,3 +1,16 @@
+/**
+ * Copyright (C) Stylianos Piperakis, Ownage Dynamics L.P.
+ * cublox is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License as published by the Free Software
+ * Foundation, version 3.
+ *
+ * cublox is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+ * A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * cublox. If not, see <https://www.gnu.org/licenses/>.
+ **/
 #include <cublox/Grid.hpp>
 #include <cublox/utils.hpp>
 
@@ -9,17 +22,17 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <vector>
 
 namespace cublox {
 
 namespace {
 
 void appendSlabHashes(std::vector<int> &hash_batch, const Grid::Config &cfg,
-                      const std::vector<int> &clear_id, int axis) {
+                      const std::vector<int> &clear_id, const int axis) {
   const std::array<int, 3> ids{axis, (axis + 1) % 3, (axis + 2) % 3};
   const int h1 = cfg.half_map_size_i(ids[1]);
   const int h2 = cfg.half_map_size_i(ids[2]);
+  // max possible number of hashes in a slab
   hash_batch.reserve(hash_batch.size() + static_cast<size_t>(clear_id.size()) *
                                              static_cast<size_t>(2 * h1 + 1) *
                                              static_cast<size_t>(2 * h2 + 1));
@@ -40,13 +53,17 @@ void appendSlabHashes(std::vector<int> &hash_batch, const Grid::Config &cfg,
 } // namespace
 
 Grid::Grid(const Eigen::Vector3i &half_map_size_i, const float resolution,
-           const std::optional<double> recenter_threshold,
+           const std::optional<float> recenter_threshold,
            const bool origin_at_center) {
   config_.resolution = resolution;
   config_.resolution_inv = 1.0f / resolution;
   config_.half_map_size_i = half_map_size_i;
   config_.map_size_i = 2 * half_map_size_i + Eigen::Vector3i::Ones();
   config_.recenter_threshold = recenter_threshold;
+  if (config_.recenter_threshold.has_value()) {
+    config_.recenter_threshold_squared =
+        config_.recenter_threshold.value() * config_.recenter_threshold.value();
+  }
   config_.origin_at_center = origin_at_center;
 
   // Compute the voxel count in int64 so we can catch overflow before
@@ -55,7 +72,7 @@ Grid::Grid(const Eigen::Vector3i &half_map_size_i, const float resolution,
   // `op == 0` early-exit, etc.), so anything that doesn't fit in
   // 31 bits is not just a memory problem — it's an API contract
   // violation that needs the dense-grid layout to be replaced with a
-  // sparse one. Throw a clear error here instead of pretending.
+  // sparse one. Throw a clear error here if that is the case.
   const std::int64_t nx = config_.map_size_i.x();
   const std::int64_t ny = config_.map_size_i.y();
   const std::int64_t nz = config_.map_size_i.z();
@@ -88,8 +105,7 @@ void Grid::recenter(const Eigen::Vector3f &pos) {
     return;
   }
 
-  const float thresh = static_cast<float>(config_.recenter_threshold.value());
-  if ((pos - origin_d_).squaredNorm() < thresh * thresh) {
+  if ((pos - origin_f_).squaredNorm() < config_.recenter_threshold_squared) {
     return;
   }
 
@@ -97,16 +113,17 @@ void Grid::recenter(const Eigen::Vector3f &pos) {
   Eigen::Vector3i new_origin_i;
   posToGlobalIndex(pos, config_.resolution_inv, config_.origin_at_center,
                    new_origin_i);
-  Eigen::Vector3f new_origin_d =
+  Eigen::Vector3f new_origin_f =
       new_origin_i.cast<float>() * config_.resolution;
 
   // Compute the delta shift
   Eigen::Vector3i shift_num = new_origin_i - origin_i_;
-  if (shift_num.cwiseAbs().maxCoeff() > config_.map_size_i.maxCoeff()) {
+  if (shift_num.cwiseAbs().maxCoeff() >= config_.map_size_i.maxCoeff()) {
     // Clear the map
     std::cout << "Resetting map" << std::endl;
     reset();
-    updateOriginAndBound(new_origin_d, new_origin_i);
+    updateOriginAndBound(new_origin_f, new_origin_i);
+    std::cout << "Map is reset" << std::endl;
     return;
   }
 
@@ -157,48 +174,47 @@ void Grid::recenter(const Eigen::Vector3f &pos) {
   }
 
   clearRecenterExitSlabs(x_slices, y_slices, z_slices);
-
-  updateOriginAndBound(new_origin_d, new_origin_i);
+  updateOriginAndBound(new_origin_f, new_origin_i);
 }
 
 void Grid::clearRecenterExitSlabs(const std::vector<int> &x_slices,
                                   const std::vector<int> &y_slices,
                                   const std::vector<int> &z_slices) {
-  std::vector<int> hash_batch_total;
+  std::vector<int> total_hash_ids;
   if (!x_slices.empty()) {
-    appendSlabHashes(hash_batch_total, config_, x_slices, 0);
+    appendSlabHashes(total_hash_ids, config_, x_slices, 0);
   }
   if (!y_slices.empty()) {
-    appendSlabHashes(hash_batch_total, config_, y_slices, 1);
+    appendSlabHashes(total_hash_ids, config_, y_slices, 1);
   }
   if (!z_slices.empty()) {
-    appendSlabHashes(hash_batch_total, config_, z_slices, 2);
+    appendSlabHashes(total_hash_ids, config_, z_slices, 2);
   }
-  if (!hash_batch_total.empty()) {
-    resetVoxels(hash_batch_total);
+  if (!total_hash_ids.empty()) {
+    resetVoxels(total_hash_ids);
   }
 }
 
 void Grid::clearVoxelsOutOfGrid(const std::vector<int> &clear_id,
                                 const int &i) {
-  std::vector<int> hash_batch;
-  appendSlabHashes(hash_batch, config_, clear_id, i);
-  resetVoxels(hash_batch);
+  std::vector<int> total_hash_ids;
+  appendSlabHashes(total_hash_ids, config_, clear_id, i);
+  resetVoxels(total_hash_ids);
 }
 
-void Grid::updateOriginAndBound(const Eigen::Vector3f &new_origin_d,
+void Grid::updateOriginAndBound(const Eigen::Vector3f &new_origin_f,
                                 const Eigen::Vector3i &new_origin_i) {
   // update local map origin and local map bound
   origin_i_ = new_origin_i;
-  origin_d_ = new_origin_d;
+  origin_f_ = new_origin_f;
 
   bound_max_i_ = origin_i_ + config_.half_map_size_i;
   bound_min_i_ = origin_i_ - config_.half_map_size_i;
 
   globalIndexToPos(bound_min_i_, config_.resolution, config_.origin_at_center,
-                   bound_min_d_);
+                   bound_min_f_);
   globalIndexToPos(bound_max_i_, config_.resolution, config_.origin_at_center,
-                   bound_max_d_);
+                   bound_max_f_);
 }
 
 void Grid::resetVoxels(const std::vector<int> &hash_ids) {
@@ -206,7 +222,5 @@ void Grid::resetVoxels(const std::vector<int> &hash_ids) {
     resetVoxel(h);
   }
 }
-
-Grid::~Grid() {}
 
 } // namespace cublox

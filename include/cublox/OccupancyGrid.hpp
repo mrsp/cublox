@@ -87,17 +87,17 @@ private:
   // config_.voxel_num > 0. Rolls back partial CUDA allocations on failure.
   void allocateVoxelBuffers_();
 
-  // Host-side mirror of d_occ_. Updated incrementally from GPU dirty lists
+  // Host-side mirror of d_occ_. Updated incrementally from GPU modified lists
   // inside update() instead of copying the entire volume each frame.
   std::vector<float> occupancy_buffer_;
 
   // GPU + host staging for voxels whose log-odds change in applyUpdateKernel.
   // Capacity equals voxel_num (at most one list entry per voxel per frame).
-  unsigned int *d_dirty_count_{nullptr};
-  int *d_dirty_idx_{nullptr};
-  float *d_dirty_val_{nullptr};
-  std::vector<int> h_dirty_idx_;
-  std::vector<float> h_dirty_val_;
+  unsigned int *d_modified_count_{nullptr};
+  int *d_modified_idx_{nullptr};
+  float *d_modified_val_{nullptr};
+  std::vector<int> h_modified_idx_;
+  std::vector<float> h_modified_val_;
 
   // Per-voxel atomics buffers, allocated in the sized constructor.
   // Sized to config_.voxel_num once.

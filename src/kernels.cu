@@ -1,3 +1,16 @@
+/**
+ * Copyright (C) Stylianos Piperakis, Ownage Dynamics L.P.
+ * cublox is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License as published by the Free Software
+ * Foundation, version 3.
+ *
+ * cublox is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+ * A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * cublox. If not, see <https://www.gnu.org/licenses/>.
+ **/
 #include <cublox/utils.cuh>
 
 #include <math_constants.h>
@@ -128,13 +141,12 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
 // TODO: detect from→to GridType jumps and emit jump events for the
 // inflation map kernel (see Tier 1 item 5 in the porting plan).
 // ─────────────────────────────────────────────────
-__global__ void
-applyUpdateKernel(float *__restrict__ occ, int *__restrict__ op_cnt,
-                  int *__restrict__ hit_cnt, const int voxel_num,
-                  const float l_hit, const float l_miss, const float l_min,
-                  const float l_max, unsigned int *__restrict__ dirty_count,
-                  int *__restrict__ dirty_idx, float *__restrict__ dirty_val,
-                  const unsigned int dirty_capacity) {
+__global__ void applyUpdateKernel(
+    float *__restrict__ occ, int *__restrict__ op_cnt,
+    int *__restrict__ hit_cnt, const int voxel_num, const float l_hit,
+    const float l_miss, const float l_min, const float l_max,
+    unsigned int *__restrict__ modified_count, int *__restrict__ modified_idx,
+    float *__restrict__ modified_val, const unsigned int modified_capacity) {
   const int h = blockIdx.x * blockDim.x + threadIdx.x;
   if (h >= voxel_num) {
     return;
@@ -167,12 +179,12 @@ applyUpdateKernel(float *__restrict__ occ, int *__restrict__ op_cnt,
   op_cnt[h] = 0;
   hit_cnt[h] = 0;
 
-  if (dirty_count != nullptr && dirty_idx != nullptr && dirty_val != nullptr &&
-      v != v0) {
-    const unsigned int slot = atomicAdd(dirty_count, 1u);
-    if (slot < dirty_capacity) {
-      dirty_idx[slot] = h;
-      dirty_val[slot] = v;
+  if (modified_count != nullptr && modified_idx != nullptr &&
+      modified_val != nullptr && v != v0) {
+    const unsigned int slot = atomicAdd(modified_count, 1u);
+    if (slot < modified_capacity) {
+      modified_idx[slot] = h;
+      modified_val[slot] = v;
     }
   }
 }
@@ -186,26 +198,29 @@ applyUpdateKernel(float *__restrict__ occ, int *__restrict__ op_cnt,
 // ─────────────────────────────────────────────────────────────────────
 void launchRayCastUpdate(const RayCastCfg &cfg, const float *d_cloud_x,
                          const float *d_cloud_y, const float *d_cloud_z,
-                         int cloud_size, int *d_op_cnt, int *d_hit_cnt,
-                         cudaStream_t stream) {
+                         const int cloud_size, const cudaStream_t stream,
+                         int *d_op_cnt, int *d_hit_cnt) {
   if (cloud_size <= 0) {
     return;
   }
 
+  // Allocate the constant memory on the GPU for the configuration.
   cudaMemcpyToSymbolAsync(c_cfg, &cfg, sizeof(RayCastCfg),
                           /*offset=*/0, cudaMemcpyHostToDevice, stream);
 
   constexpr int kBlock = 256;
   const int grid = (cloud_size + kBlock - 1) / kBlock;
-  rayCastUpdateKernel<<<grid, kBlock, 0, stream>>>(
+  rayCastUpdateKernel<<<grid, kBlock, /*shared_mem_size=*/0, stream>>>(
       d_cloud_x, d_cloud_y, d_cloud_z, cloud_size, d_op_cnt, d_hit_cnt);
 }
 
 void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
-                       int voxel_num, float l_hit, float l_miss, float l_min,
-                       float l_max, cudaStream_t stream,
-                       unsigned int *d_dirty_count, int *d_dirty_idx,
-                       float *d_dirty_val, unsigned int dirty_capacity) {
+                       const int voxel_num, const float l_hit,
+                       const float l_miss, const float l_min, const float l_max,
+                       const cudaStream_t stream,
+                       unsigned int *d_modified_count, int *d_modified_idx,
+                       float *d_modified_val,
+                       const unsigned int modified_capacity) {
   if (voxel_num <= 0) {
     return;
   }
@@ -217,18 +232,18 @@ void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
   int *di = nullptr;
   float *dv = nullptr;
   unsigned int cap = 0;
-  if (d_dirty_count != nullptr && d_dirty_idx != nullptr &&
-      d_dirty_val != nullptr &&
-      static_cast<unsigned int>(voxel_num) <= dirty_capacity) {
-    dc = d_dirty_count;
-    di = d_dirty_idx;
-    dv = d_dirty_val;
-    cap = dirty_capacity;
+  if (d_modified_count != nullptr && d_modified_idx != nullptr &&
+      d_modified_val != nullptr &&
+      static_cast<unsigned int>(voxel_num) <= modified_capacity) {
+    dc = d_modified_count;
+    di = d_modified_idx;
+    dv = d_modified_val;
+    cap = modified_capacity;
   }
 
-  applyUpdateKernel<<<grid, kBlock, 0, stream>>>(d_occ, d_op_cnt, d_hit_cnt,
-                                                 voxel_num, l_hit, l_miss,
-                                                 l_min, l_max, dc, di, dv, cap);
+  applyUpdateKernel<<<grid, kBlock, /*shared_mem_size=*/0, stream>>>(
+      d_occ, d_op_cnt, d_hit_cnt, voxel_num, l_hit, l_miss, l_min, l_max, dc,
+      di, dv, cap);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -248,25 +263,26 @@ __global__ void clearVoxelsByIndexKernel(float *__restrict__ occ,
   }
 }
 
-void launchClearVoxelsByIndex(float *d_occ, const int *d_indices, int n,
-                              int voxel_num, cudaStream_t stream) {
-  if (n <= 0 || d_occ == nullptr || d_indices == nullptr) {
+void launchClearVoxelsByIndex(float *d_occ, const int *d_indices, const int n,
+                              const int voxel_num, const cudaStream_t stream) {
+  if (n <= 0 || d_occ == nullptr || d_indices == nullptr || voxel_num <= 0) {
     return;
   }
 
   constexpr int kBlock = 256;
   const int grid_dim = (n + kBlock - 1) / kBlock;
-  clearVoxelsByIndexKernel<<<grid_dim, kBlock, 0, stream>>>(d_occ, d_indices, n,
-                                                            voxel_num);
+  clearVoxelsByIndexKernel<<<grid_dim, kBlock, /*shared_mem_size=*/0, stream>>>(
+      d_occ, d_indices, n, voxel_num);
 }
 
 // ─────────────────────────────────────────────────────────────────────
 // Recenter slab clear — one thread per row along fastest (z) or strided
 // (y) index so inner loops touch contiguous / regular d_occ[] addresses.
 // ─────────────────────────────────────────────────────────────────────
-__global__ void clearRecenterSlabAxis0Kernel(
-    float *__restrict__ occ, int3 ms, int3 hs, const int *__restrict__ d_vals,
-    int n_slices) {
+__global__ void clearRecenterSlabAxis0Kernel(float *__restrict__ occ, int3 ms,
+                                             int3 hs,
+                                             const int *__restrict__ d_vals,
+                                             int n_slices) {
   const int ny = ms.y;
   const int nz = ms.z;
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -286,9 +302,10 @@ __global__ void clearRecenterSlabAxis0Kernel(
   }
 }
 
-__global__ void clearRecenterSlabAxis1Kernel(
-    float *__restrict__ occ, int3 ms, int3 hs, const int *__restrict__ d_vals,
-    int n_slices) {
+__global__ void clearRecenterSlabAxis1Kernel(float *__restrict__ occ, int3 ms,
+                                             int3 hs,
+                                             const int *__restrict__ d_vals,
+                                             int n_slices) {
   const int nx = ms.x;
   const int nz = ms.z;
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -308,9 +325,10 @@ __global__ void clearRecenterSlabAxis1Kernel(
   }
 }
 
-__global__ void clearRecenterSlabAxis2Kernel(
-    float *__restrict__ occ, int3 ms, int3 hs, const int *__restrict__ d_vals,
-    int n_slices) {
+__global__ void clearRecenterSlabAxis2Kernel(float *__restrict__ occ, int3 ms,
+                                             int3 hs,
+                                             const int *__restrict__ d_vals,
+                                             int n_slices) {
   const int nx = ms.x;
   const int ny = ms.y;
   const int nz = ms.z;
@@ -331,10 +349,11 @@ __global__ void clearRecenterSlabAxis2Kernel(
   }
 }
 
-void launchClearRecenterSlabsForAxis(float *d_occ, int3 map_size_i,
-                                     int3 half_map_size_i,
+void launchClearRecenterSlabsForAxis(float *d_occ, const int3 &map_size_i,
+                                     const int3 &half_map_size_i,
                                      const int *d_slice_local_values,
-                                     int n_slices, int axis, cudaStream_t stream) {
+                                     const int n_slices, const int axis,
+                                     const cudaStream_t stream) {
   if (n_slices <= 0 || d_occ == nullptr || d_slice_local_values == nullptr) {
     return;
   }

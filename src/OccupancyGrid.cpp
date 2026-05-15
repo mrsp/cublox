@@ -137,17 +137,17 @@ OccupancyGrid::~OccupancyGrid() {
     cudaFree(d_cloud_z_);
     d_cloud_z_ = nullptr;
   }
-  if (d_dirty_val_) {
-    cudaFree(d_dirty_val_);
-    d_dirty_val_ = nullptr;
+  if (d_modified_val_) {
+    cudaFree(d_modified_val_);
+    d_modified_val_ = nullptr;
   }
-  if (d_dirty_idx_) {
-    cudaFree(d_dirty_idx_);
-    d_dirty_idx_ = nullptr;
+  if (d_modified_idx_) {
+    cudaFree(d_modified_idx_);
+    d_modified_idx_ = nullptr;
   }
-  if (d_dirty_count_) {
-    cudaFree(d_dirty_count_);
-    d_dirty_count_ = nullptr;
+  if (d_modified_count_) {
+    cudaFree(d_modified_count_);
+    d_modified_count_ = nullptr;
   }
   for (int a = 0; a < 3; ++a) {
     if (recenter_stream_[a] != nullptr) {
@@ -179,8 +179,8 @@ void OccupancyGrid::reset() {
   CUDA_OK(cudaMemset(d_occ_, 0, n * sizeof(float)));
   CUDA_OK(cudaMemset(d_op_cnt_, 0, n * sizeof(int)));
   CUDA_OK(cudaMemset(d_hit_cnt_, 0, n * sizeof(int)));
-  if (d_dirty_count_) {
-    CUDA_OK(cudaMemset(d_dirty_count_, 0, sizeof(unsigned int)));
+  if (d_modified_count_) {
+    CUDA_OK(cudaMemset(d_modified_count_, 0, sizeof(unsigned int)));
   }
 }
 
@@ -215,10 +215,10 @@ void OccupancyGrid::resetVoxels(const std::vector<int> &hash_ids) {
   int offset = 0;
   while (offset < total) {
     const int chunk = std::min(cap, total - offset);
-    CUDA_OK(cudaMemcpy(d_dirty_idx_, hash_ids.data() + offset,
+    CUDA_OK(cudaMemcpy(d_modified_idx_, hash_ids.data() + offset,
                        static_cast<size_t>(chunk) * sizeof(int),
                        cudaMemcpyHostToDevice));
-    launchClearVoxelsByIndex(d_occ_, d_dirty_idx_, chunk, cap, /*stream=*/0);
+    launchClearVoxelsByIndex(d_occ_, d_modified_idx_, chunk, cap, /*stream=*/0);
     offset += chunk;
   }
   CUDA_OK(cudaDeviceSynchronize());
@@ -295,15 +295,15 @@ void OccupancyGrid::allocateVoxelBuffers_() {
     CUDA_OK(cudaMalloc(&d_op_cnt_, int_bytes));
     CUDA_OK(cudaMalloc(&d_hit_cnt_, int_bytes));
     CUDA_OK(cudaMalloc(&d_occ_, flt_bytes));
-    CUDA_OK(cudaMalloc(&d_dirty_count_, sizeof(unsigned int)));
-    CUDA_OK(cudaMalloc(&d_dirty_idx_, int_bytes));
-    CUDA_OK(cudaMalloc(&d_dirty_val_, flt_bytes));
+    CUDA_OK(cudaMalloc(&d_modified_count_, sizeof(unsigned int)));
+    CUDA_OK(cudaMalloc(&d_modified_idx_, int_bytes));
+    CUDA_OK(cudaMalloc(&d_modified_val_, flt_bytes));
     CUDA_OK(cudaMemset(d_op_cnt_, 0, int_bytes));
     CUDA_OK(cudaMemset(d_hit_cnt_, 0, int_bytes));
     CUDA_OK(cudaMemset(d_occ_, 0, flt_bytes));
-    CUDA_OK(cudaMemset(d_dirty_count_, 0, sizeof(unsigned int)));
-    h_dirty_idx_.resize(n);
-    h_dirty_val_.resize(n);
+    CUDA_OK(cudaMemset(d_modified_count_, 0, sizeof(unsigned int)));
+    h_modified_idx_.resize(n);
+    h_modified_val_.resize(n);
     for (int a = 0; a < 3; ++a) {
       CUDA_OK(cudaStreamCreate(&recenter_stream_[a]));
       const size_t slice_bytes =
@@ -326,17 +326,17 @@ void OccupancyGrid::allocateVoxelBuffers_() {
         recenter_stream_[a] = nullptr;
       }
     }
-    if (d_dirty_val_) {
-      cudaFree(d_dirty_val_);
-      d_dirty_val_ = nullptr;
+    if (d_modified_val_) {
+      cudaFree(d_modified_val_);
+      d_modified_val_ = nullptr;
     }
-    if (d_dirty_idx_) {
-      cudaFree(d_dirty_idx_);
-      d_dirty_idx_ = nullptr;
+    if (d_modified_idx_) {
+      cudaFree(d_modified_idx_);
+      d_modified_idx_ = nullptr;
     }
-    if (d_dirty_count_) {
-      cudaFree(d_dirty_count_);
-      d_dirty_count_ = nullptr;
+    if (d_modified_count_) {
+      cudaFree(d_modified_count_);
+      d_modified_count_ = nullptr;
     }
     if (d_occ_) {
       cudaFree(d_occ_);
@@ -350,8 +350,8 @@ void OccupancyGrid::allocateVoxelBuffers_() {
       cudaFree(d_op_cnt_);
       d_op_cnt_ = nullptr;
     }
-    h_dirty_idx_.clear();
-    h_dirty_val_.clear();
+    h_modified_idx_.clear();
+    h_modified_val_.clear();
     occupancy_buffer_.clear();
     throw;
   }
@@ -425,38 +425,38 @@ void OccupancyGrid::update(const PointCloud &cloud,
 
   // Pass 1: walk every ray, atomic-increment op_cnt per voxel and
   // hit_cnt at endpoints.
-  launchRayCastUpdate(cfg, d_cloud_x_, d_cloud_y_, d_cloud_z_, n, d_op_cnt_,
-                      d_hit_cnt_, /*stream=*/0);
+  launchRayCastUpdate(cfg, d_cloud_x_, d_cloud_y_, d_cloud_z_, n, /*stream=*/0,
+                      d_op_cnt_, d_hit_cnt_);
 
-  CUDA_OK(cudaMemsetAsync(d_dirty_count_, 0, sizeof(unsigned int),
+  CUDA_OK(cudaMemsetAsync(d_modified_count_, 0, sizeof(unsigned int),
                           /*stream=*/0));
 
   // Pass 2: fold counters into d_occ_; record voxels whose log-odds change.
   launchApplyUpdate(d_occ_, d_op_cnt_, d_hit_cnt_, config_.voxel_num, l_hit_,
-                    l_miss_, l_min_, l_max_, /*stream=*/0, d_dirty_count_,
-                    d_dirty_idx_, d_dirty_val_,
+                    l_miss_, l_min_, l_max_, /*stream=*/0, d_modified_count_,
+                    d_modified_idx_, d_modified_val_,
                     static_cast<unsigned int>(config_.voxel_num));
 
   CUDA_OK(cudaDeviceSynchronize());
 
-  unsigned int dirty_n = 0;
-  CUDA_OK(cudaMemcpy(&dirty_n, d_dirty_count_, sizeof(unsigned int),
+  unsigned int modified_n = 0;
+  CUDA_OK(cudaMemcpy(&modified_n, d_modified_count_, sizeof(unsigned int),
                      cudaMemcpyDeviceToHost));
 
-  dirty_n = std::min(dirty_n, static_cast<unsigned int>(config_.voxel_num));
-  if (dirty_n > 0) {
-    CUDA_OK(cudaMemcpy(h_dirty_idx_.data(), d_dirty_idx_,
-                       static_cast<size_t>(dirty_n) * sizeof(int),
+  modified_n = std::min(modified_n, static_cast<unsigned int>(config_.voxel_num));
+  if (modified_n > 0) {
+    CUDA_OK(cudaMemcpy(h_modified_idx_.data(), d_modified_idx_,
+                       static_cast<size_t>(modified_n) * sizeof(int),
                        cudaMemcpyDeviceToHost));
-    CUDA_OK(cudaMemcpy(h_dirty_val_.data(), d_dirty_val_,
-                       static_cast<size_t>(dirty_n) * sizeof(float),
+    CUDA_OK(cudaMemcpy(h_modified_val_.data(), d_modified_val_,
+                       static_cast<size_t>(modified_n) * sizeof(float),
                        cudaMemcpyDeviceToHost));
 
-    for (unsigned int i = 0U; i < dirty_n; ++i) {
-      const int hid = h_dirty_idx_[static_cast<size_t>(i)];
+    for (unsigned int i = 0U; i < modified_n; ++i) {
+      const int hid = h_modified_idx_[static_cast<size_t>(i)];
       if (hid >= 0 && hid < config_.voxel_num) {
         occupancy_buffer_[static_cast<size_t>(hid)] =
-            h_dirty_val_[static_cast<size_t>(i)];
+            h_modified_val_[static_cast<size_t>(i)];
       }
     }
   }

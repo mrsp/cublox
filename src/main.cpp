@@ -297,7 +297,7 @@ public:
                                odom_path_.poses.begin() +
                                    static_cast<std::ptrdiff_t>(excess));
       }
-      map_dirty_ = true;
+      map_has_data_ = true;
     }
     publish_cv_.notify_one();
   }
@@ -364,15 +364,15 @@ private:
     while (!shutdown_ && rclcpp::ok()) {
       std::unique_lock<std::mutex> publish_lock(publish_mutex_);
       publish_cv_.wait(publish_lock, [this] {
-        return map_dirty_ || shutdown_ || !rclcpp::ok();
+        return map_has_data_ || shutdown_ || !rclcpp::ok();
       });
       if (shutdown_ || !rclcpp::ok()) {
         break;
       }
-      if (!map_dirty_) {
+      if (!map_has_data_) {
         continue;
       }
-      map_dirty_ = false;
+      map_has_data_ = false;
       auto latest_odom = latest_odom_;
       nav_msgs::msg::Path path_out = odom_path_;
       publish_lock.unlock();
@@ -472,7 +472,7 @@ private:
 
   rclcpp::TimerBase::SharedPtr timer_;
   std::condition_variable publish_cv_;
-  bool map_dirty_{false};
+  bool map_has_data_{false};
 
   std::atomic<bool> shutdown_{false};
   std::thread publish_thread_;

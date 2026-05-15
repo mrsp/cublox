@@ -25,7 +25,6 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wall>
                     $<$<COMPILE_LANGUAGE:CXX>:-g>)
 
 find_package(Eigen3 REQUIRED)
-find_package(yaml-cpp REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 find_package(GTest REQUIRED)
 
@@ -54,11 +53,7 @@ set_target_properties(cublox PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
   CUDA_RESOLVE_DEVICE_SYMBOLS ON)
 
-if(TARGET yaml-cpp::yaml-cpp)
-  target_link_libraries(cublox PUBLIC yaml-cpp::yaml-cpp CUDA::cudart)
-else()
-  target_link_libraries(cublox PUBLIC yaml-cpp CUDA::cudart)
-endif()
+target_link_libraries(cublox PUBLIC CUDA::cudart)
 
 add_executable(occupancy_grid_perf_test
   test_occupancy_grid_perf.cpp)
