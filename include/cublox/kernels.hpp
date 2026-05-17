@@ -57,28 +57,25 @@ void launchRayCastUpdate(const RayCastCfg &cfg, const float *d_cloud_x,
 // [l_min, l_max], then zeros both counters so the next raycast pass
 // starts from a clean slate. Voxels with op_cnt == 0 early-exit.
 //
-// d_occ:    voxel_num floats, persistent log-odds buffer (UNKNOWN = 0).
-// d_op_cnt, d_hit_cnt: voxel_num ints, written by rayCastUpdateKernel.
-//
-// If `d_modified_count` is non-null, voxels whose log-odds value changes are
-// appended as (modified_idx[i], modified_val[i]) with `modified_capacity >=
-// voxel_num` (each voxel updates at most once per frame). `d_modified_count`
-// must be cleared to 0 before this launch each frame.
+// d_occ: zero-centered log-odds: stored = logit - l_unknown (unknown prior ==
+// 0). Pass the same l_unknown used on host for queries so hits/misses update
+// true logit then re-encode to stored.
 void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
                        const int voxel_num, const float l_hit,
                        const float l_miss, const float l_min, const float l_max,
-                       const cudaStream_t stream,
+                       const float l_unknown, const cudaStream_t stream,
                        unsigned int *d_modified_count = nullptr,
                        int *d_modified_idx = nullptr,
                        float *d_modified_val = nullptr,
                        const unsigned int modified_capacity = 0);
 
-// Zero `d_occ[h]` for each index in `d_indices[0..n-1]` (one CUDA launch).
+// Reset `d_occ[h]` for each index in `d_indices[0..n-1]` (one CUDA launch).
 void launchClearVoxelsByIndex(float *d_occ, const int *d_indices, const int n,
                               const int voxel_num, const cudaStream_t stream);
 
-// Recenter: clear exiting axis-aligned slabs on GPU. One thread per row;
-// inner loop uses contiguous d_occ indices (++h or h += nz) for bandwidth.
+// Recenter: reset exiting axis-aligned slabs on GPU.
+// One thread per row; inner loop uses contiguous d_occ indices (++h or h +=
+// nz) for bandwidth.
 void launchClearRecenterSlabsForAxis(float *d_occ, const int3 &map_size_i,
                                      const int3 &half_map_size_i,
                                      const int *d_slice_local_values,

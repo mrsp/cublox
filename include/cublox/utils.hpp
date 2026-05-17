@@ -14,6 +14,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <cmath>
 
 namespace cublox {
@@ -176,6 +177,12 @@ inline int posToHashIndex(const Eigen::Vector3f &pos,
   Eigen::Vector3i id_g;
   posToGlobalIndex(pos, resolution_inv, origin_at_center, id_g);
   return globalIndexToHashId(id_g, map_size_i, half_map_size_i);
+}
+
+// Probability p ∈ (0,1) → log-odds. Clamped for numerical robustness near 0 / 1.
+inline float logit(const float p) {
+  const float pc = std::clamp(p, 1.0e-6f, 1.0f - 1.0e-6f);
+  return std::log(pc / (1.0f - pc));
 }
 
 } // namespace cublox

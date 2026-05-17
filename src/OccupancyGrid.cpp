@@ -61,8 +61,8 @@ size_t upperBoundSlabTouches(const Grid::Config &cfg,
   return v;
 }
 
-// Same slab geometry as Grid sliding-window clear; host mirror only.
-// Device slabs were cleared via launchClearRecenterSlabsForAxis.
+// Host mirror: set exiting slabs to stored 0 (unknown prior in zero-centered
+// encoding). Device slabs cleared by launchClearRecenterSlabsForAxis.
 void zeroHostMirrorSlabs(std::vector<float> &occ, const Grid::Config &cfg,
                          const std::vector<int> &x_slices,
                          const std::vector<int> &y_slices,
@@ -166,8 +166,7 @@ OccupancyGrid::~OccupancyGrid() {
 }
 
 void OccupancyGrid::reset() {
-  // Host mirror — keep in lock-step with the device buffer so an
-  // is*() query right after reset() returns UNKNOWN as expected.
+  // Stored unknown prior == 0 (decodes to (l_free + l_occ)/2 via + l_unknown_).
   std::fill(occupancy_buffer_.begin(), occupancy_buffer_.end(), 0.0f);
 
   // Default-constructed grid: no voxel storage. Sized grid: ctor allocated
@@ -199,6 +198,7 @@ void OccupancyGrid::resetVoxels(const std::vector<int> &hash_ids) {
   if (hash_ids.empty()) {
     return;
   }
+
   const size_t buf_sz = occupancy_buffer_.size();
   for (int h : hash_ids) {
     if (h >= 0 && static_cast<size_t>(h) < buf_sz) {
@@ -218,7 +218,8 @@ void OccupancyGrid::resetVoxels(const std::vector<int> &hash_ids) {
     CUDA_OK(cudaMemcpy(d_modified_idx_, hash_ids.data() + offset,
                        static_cast<size_t>(chunk) * sizeof(int),
                        cudaMemcpyHostToDevice));
-    launchClearVoxelsByIndex(d_occ_, d_modified_idx_, chunk, cap, /*stream=*/0);
+    launchClearVoxelsByIndex(d_occ_, d_modified_idx_, chunk, cap,
+                             /*stream=*/0);
     offset += chunk;
   }
   CUDA_OK(cudaDeviceSynchronize());
@@ -265,7 +266,8 @@ void OccupancyGrid::clearRecenterExitSlabs(const std::vector<int> &x_slices,
   CUDA_OK(cudaDeviceSynchronize());
 
   // Full map is ~4e8 B for your default YAML; D2H that every recenter costs
-  // tens of ms. Unsynced host mirror only needs zeros on exiting slabs.
+  // tens of ms. When few voxels touched, mirror the exiting slabs only
+  // (unknown prior).
   const size_t slab_ub =
       upperBoundSlabTouches(config_, x_slices, y_slices, z_slices);
   const size_t d2h_threshold =
@@ -433,8 +435,8 @@ void OccupancyGrid::update(const PointCloud &cloud,
 
   // Pass 2: fold counters into d_occ_; record voxels whose log-odds change.
   launchApplyUpdate(d_occ_, d_op_cnt_, d_hit_cnt_, config_.voxel_num, l_hit_,
-                    l_miss_, l_min_, l_max_, /*stream=*/0, d_modified_count_,
-                    d_modified_idx_, d_modified_val_,
+                    l_miss_, l_min_, l_max_, l_unknown_, /*stream=*/0,
+                    d_modified_count_, d_modified_idx_, d_modified_val_,
                     static_cast<unsigned int>(config_.voxel_num));
 
   CUDA_OK(cudaDeviceSynchronize());
@@ -443,7 +445,8 @@ void OccupancyGrid::update(const PointCloud &cloud,
   CUDA_OK(cudaMemcpy(&modified_n, d_modified_count_, sizeof(unsigned int),
                      cudaMemcpyDeviceToHost));
 
-  modified_n = std::min(modified_n, static_cast<unsigned int>(config_.voxel_num));
+  modified_n =
+      std::min(modified_n, static_cast<unsigned int>(config_.voxel_num));
   if (modified_n > 0) {
     CUDA_OK(cudaMemcpy(h_modified_idx_.data(), d_modified_idx_,
                        static_cast<size_t>(modified_n) * sizeof(int),
@@ -468,7 +471,7 @@ bool OccupancyGrid::isOccupied(const Eigen::Vector3f &pos) const {
   if (!inside(pos)) {
     return false;
   }
-  return isOccupied(occupancy_buffer_[posToHashIndex(
+  return occOccupied_(occupancy_buffer_[posToHashIndex(
       pos, config_.map_size_i, config_.half_map_size_i, config_.resolution_inv,
       config_.origin_at_center)]);
 }
@@ -478,7 +481,7 @@ bool OccupancyGrid::isUnknown(const Eigen::Vector3f &pos) const {
     return true;
   }
 
-  return isUnknown(occupancy_buffer_[posToHashIndex(
+  return occUnknown_(occupancy_buffer_[posToHashIndex(
       pos, config_.map_size_i, config_.half_map_size_i, config_.resolution_inv,
       config_.origin_at_center)]);
 }
@@ -488,7 +491,7 @@ bool OccupancyGrid::isKnownFree(const Eigen::Vector3f &pos) const {
     return false;
   }
 
-  return isKnownFree(occupancy_buffer_[posToHashIndex(
+  return occKnownFree_(occupancy_buffer_[posToHashIndex(
       pos, config_.map_size_i, config_.half_map_size_i, config_.resolution_inv,
       config_.origin_at_center)]);
 }
@@ -498,7 +501,7 @@ bool OccupancyGrid::isOccupied(const Eigen::Vector3i &id_g) const {
     return false;
   }
 
-  return isOccupied(occupancy_buffer_[globalIndexToHashId(
+  return occOccupied_(occupancy_buffer_[globalIndexToHashId(
       id_g, config_.map_size_i, config_.half_map_size_i)]);
 }
 
@@ -507,7 +510,7 @@ bool OccupancyGrid::isUnknown(const Eigen::Vector3i &id_g) const {
     return true;
   }
 
-  return isUnknown(occupancy_buffer_[globalIndexToHashId(
+  return occUnknown_(occupancy_buffer_[globalIndexToHashId(
       id_g, config_.map_size_i, config_.half_map_size_i)]);
 }
 
@@ -516,20 +519,20 @@ bool OccupancyGrid::isKnownFree(const Eigen::Vector3i &id_g) const {
     return false;
   }
 
-  return isKnownFree(occupancy_buffer_[globalIndexToHashId(
+  return occKnownFree_(occupancy_buffer_[globalIndexToHashId(
       id_g, config_.map_size_i, config_.half_map_size_i)]);
 }
 
 bool OccupancyGrid::isOccupied(const int hash_id) const {
-  return isOccupied(occupancy_buffer_[hash_id]);
+  return occOccupied_(occupancy_buffer_[hash_id]);
 }
 
 bool OccupancyGrid::isUnknown(const int hash_id) const {
-  return isUnknown(occupancy_buffer_[hash_id]);
+  return occUnknown_(occupancy_buffer_[hash_id]);
 }
 
 bool OccupancyGrid::isKnownFree(const int hash_id) const {
-  return isKnownFree(occupancy_buffer_[hash_id]);
+  return occKnownFree_(occupancy_buffer_[hash_id]);
 }
 
 } // namespace cublox

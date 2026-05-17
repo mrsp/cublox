@@ -125,28 +125,24 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
 // ─────────────────────────────────────────────────
 // applyUpdateKernel
 //
-// One thread per voxel. Replaces the host-side `update_cache_id_g`
-// queue from the original ROG-Map: instead of remembering which voxels
-// got touched, we sweep the whole local map and let untouched voxels
-// (op_cnt == 0) early-out. The early-out is a single coalesced load +
-// branch — essentially free relative to the cost of the raycast pass.
+// Buffer stores zero-centered logits: occ[h] == logit - l_unknown (unknown ==
+// 0). Decode before hit/miss, clamp true logit to [l_min, l_max], re-encode.
 //
-// Hit dominates: if any ray ended in this voxel this frame, we apply
-// the hit update with `hit` counts (clamped to l_max). Otherwise we
-// apply the miss update with `op` counts (clamped to l_min). This
-// matches ProbMap::probabilisticMapFromCache in the CPU reference.
+// One thread per voxel. Untouched voxels (op_cnt == 0) early-out.
 //
-// After updating, both counters are zeroed so the next frame can run
-// raycast atomics into a clean buffer.
-// TODO: detect from→to GridType jumps and emit jump events for the
-// inflation map kernel (see Tier 1 item 5 in the porting plan).
+// Hit dominates: endpoint hits apply l_hit * hit_count; else miss applies
+// l_miss * op_count.
+//
+// After updating, counters zero for the next raycast pass.
+// TODO: detect from→to GridType jumps for inflation map (porting plan).
 // ─────────────────────────────────────────────────
 __global__ void applyUpdateKernel(
     float *__restrict__ occ, int *__restrict__ op_cnt,
     int *__restrict__ hit_cnt, const int voxel_num, const float l_hit,
     const float l_miss, const float l_min, const float l_max,
-    unsigned int *__restrict__ modified_count, int *__restrict__ modified_idx,
-    float *__restrict__ modified_val, const unsigned int modified_capacity) {
+    const float l_unknown, unsigned int *__restrict__ modified_count,
+    int *__restrict__ modified_idx, float *__restrict__ modified_val,
+    const unsigned int modified_capacity) {
   const int h = blockIdx.x * blockDim.x + threadIdx.x;
   if (h >= voxel_num) {
     return;
@@ -158,33 +154,34 @@ __global__ void applyUpdateKernel(
   }
 
   const int hit = hit_cnt[h];
-  const float v0 = occ[h];
-  float v = v0;
+  const float stored0 = occ[h];
+  float logit = stored0 + l_unknown;
 
   if (hit > 0) {
-    v += l_hit * static_cast<float>(hit);
-    if (v > l_max) {
-      v = l_max;
+    logit += l_hit * static_cast<float>(hit);
+    if (logit > l_max) {
+      logit = l_max;
     }
   } else {
     // op > 0 and hit == 0 → all `op` operations on this voxel were
     // free-space crossings (misses).
-    v += l_miss * static_cast<float>(op);
-    if (v < l_min) {
-      v = l_min;
+    logit += l_miss * static_cast<float>(op);
+    if (logit < l_min) {
+      logit = l_min;
     }
   }
 
-  occ[h] = v;
+  const float stored = logit - l_unknown;
+  occ[h] = stored;
   op_cnt[h] = 0;
   hit_cnt[h] = 0;
 
   if (modified_count != nullptr && modified_idx != nullptr &&
-      modified_val != nullptr && v != v0) {
+      modified_val != nullptr && stored != stored0) {
     const unsigned int slot = atomicAdd(modified_count, 1u);
     if (slot < modified_capacity) {
       modified_idx[slot] = h;
-      modified_val[slot] = v;
+      modified_val[slot] = stored;
     }
   }
 }
@@ -217,7 +214,7 @@ void launchRayCastUpdate(const RayCastCfg &cfg, const float *d_cloud_x,
 void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
                        const int voxel_num, const float l_hit,
                        const float l_miss, const float l_min, const float l_max,
-                       const cudaStream_t stream,
+                       const float l_unknown, const cudaStream_t stream,
                        unsigned int *d_modified_count, int *d_modified_idx,
                        float *d_modified_val,
                        const unsigned int modified_capacity) {
@@ -242,12 +239,12 @@ void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
   }
 
   applyUpdateKernel<<<grid, kBlock, /*shared_mem_size=*/0, stream>>>(
-      d_occ, d_op_cnt, d_hit_cnt, voxel_num, l_hit, l_miss, l_min, l_max, dc,
-      di, dv, cap);
+      d_occ, d_op_cnt, d_hit_cnt, voxel_num, l_hit, l_miss, l_min, l_max,
+      l_unknown, dc, di, dv, cap);
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// clearVoxelsByIndexKernel — map sliding: clear many scattered voxels in
+// clearVoxelsByIndexKernel — map sliding: reset many scattered voxels in
 // one launch (avoids one cudaMemset per voxel).
 // ─────────────────────────────────────────────────────────────────────
 __global__ void clearVoxelsByIndexKernel(float *__restrict__ occ,

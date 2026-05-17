@@ -10,6 +10,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -18,9 +19,9 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
-#include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
@@ -28,8 +29,6 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
-#include <visualization_msgs/msg/marker.hpp>
-#include <visualization_msgs/msg/marker_array.hpp>
 
 namespace {
 
@@ -44,26 +43,26 @@ std::string resolveConfigPath(const std::string &maybe_empty) {
   return p.string();
 }
 
-geometry_msgs::msg::Point eigenToPoint(const Eigen::Vector3f &p) {
-  geometry_msgs::msg::Point out;
-  out.x = p.x();
-  out.y = p.y();
-  out.z = p.z();
-  return out;
-}
-
 struct CubloxConfig {
   Eigen::Isometry3f T_base_to_lidar{Eigen::Isometry3f::Identity()};
   std::string map_frame{"odom"};
   std::string pointcloud_topic{"/points"};
   std::string odom_topic{"/odom"};
-  std::string visualization_topic{"/cublox/occupancy_markers"};
-  std::string path_topic{"/cublox/odom_path"};
+  // Published every grid update, regardless of publish_occupancy_cloud.
+  bool publish_occupancy_cloud{true};
+  int occupancy_viz_subsample{1};
+  int occupancy_viz_max_points{100000};
   Eigen::Vector3i half_map_size{32, 32, 8};
   float resolution{0.05f};
   bool origin_at_center{false};
   std::optional<double> recenter_threshold;
   float max_raycast_range{20.0f};
+  float l_hit{0.847f};       //  logit(0.70)
+  float l_miss{-0.405f};     //  logit(0.40)
+  float l_min{-1.992f};      //  logit(0.12)
+  float l_max{3.476f};       //  logit(0.97)
+  float l_free{-0.0004f};    //  logit(0.499)
+  float l_occupied{1.7346f}; //  logit(0.85)
 };
 
 CubloxConfig loadConfigFromYaml(const std::string &path) {
@@ -120,6 +119,22 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
     cfg.max_raycast_range = root["max_raycast_range"].as<float>();
   }
 
+  if (root["publish_occupancy_cloud"]) {
+    cfg.publish_occupancy_cloud = root["publish_occupancy_cloud"].as<bool>();
+  }
+  if (root["occupancy_viz_subsample"]) {
+    cfg.occupancy_viz_subsample = root["occupancy_viz_subsample"].as<int>();
+    if (cfg.occupancy_viz_subsample < 1) {
+      throw std::runtime_error("occupancy_viz_subsample must be >= 1");
+    }
+  }
+  if (root["occupancy_viz_max_points"]) {
+    cfg.occupancy_viz_max_points = root["occupancy_viz_max_points"].as<int>();
+    if (cfg.occupancy_viz_max_points < 0) {
+      throw std::runtime_error("occupancy_viz_max_points must be >= 0");
+    }
+  }
+
   if (!root["base_to_lidar"]) {
     throw std::runtime_error("YAML missing required key 'base_to_lidar' in " +
                              path);
@@ -160,10 +175,64 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
   cfg.T_base_to_lidar.setIdentity();
   cfg.T_base_to_lidar.linear() = q.toRotationMatrix();
   cfg.T_base_to_lidar.translation() = trans;
+
+  if (root["probabilities"]) {
+    const YAML::Node probabilities_params = root["probabilities"];
+    if (probabilities_params["hit"]) {
+      cfg.l_hit = cublox::logit(probabilities_params["hit"].as<float>());
+    }
+    if (probabilities_params["miss"]) {
+      cfg.l_miss = cublox::logit(probabilities_params["miss"].as<float>());
+    }
+    if (probabilities_params["min"]) {
+      cfg.l_min = cublox::logit(probabilities_params["min"].as<float>());
+    }
+    if (probabilities_params["max"]) {
+      cfg.l_max = cublox::logit(probabilities_params["max"].as<float>());
+    }
+    if (probabilities_params["free"]) {
+      cfg.l_free = cublox::logit(probabilities_params["free"].as<float>());
+    }
+    if (probabilities_params["occupied"]) {
+      cfg.l_occupied =
+          cublox::logit(probabilities_params["occupied"].as<float>());
+    }
+  }
   return cfg;
 }
 
 } // namespace
+
+void distanceToOccupancyColor(float d, float d_max,
+                              std_msgs::msg::ColorRGBA &c) {
+  const float d_max_clamped = std::max(d_max, 1.0f);
+  const float t = std::clamp(d / d_max_clamped, 0.0f, 1.0f);
+  if (t <= 0.5f) {
+    const float k = t * 2.0f;
+    c.r = 0.0f;
+    c.g = 1.0f - k;
+    c.b = k;
+  } else {
+    const float k = (t - 0.5f) * 2.0f;
+    c.r = k;
+    c.g = 0.0f;
+    c.b = 1.0f - k;
+  }
+  c.a = 1.0f;
+}
+
+float packRGBFloat(const std_msgs::msg::ColorRGBA &col) {
+  const uint32_t ur =
+      static_cast<uint32_t>(std::clamp(col.r, 0.f, 1.f) * 255.f);
+  const uint32_t ug =
+      static_cast<uint32_t>(std::clamp(col.g, 0.f, 1.f) * 255.f);
+  const uint32_t ub =
+      static_cast<uint32_t>(std::clamp(col.b, 0.f, 1.f) * 255.f);
+  const uint32_t packed = (ur << 16) | (ug << 8) | ub;
+  float rgb_f = 0.f;
+  std::memcpy(&rgb_f, &packed, sizeof(float));
+  return rgb_f;
+}
 
 class CubloxDriver : public rclcpp::Node {
 public:
@@ -185,12 +254,19 @@ public:
     pointcloud_topic_ = cublox_cfg.pointcloud_topic;
     odom_topic_ = cublox_cfg.odom_topic;
 
+    publish_occupancy_cloud_ = cublox_cfg.publish_occupancy_cloud;
+    occupancy_viz_subsample_ = cublox_cfg.occupancy_viz_subsample;
+    occupancy_viz_max_points_ = cublox_cfg.occupancy_viz_max_points;
+
     grid_ = std::make_unique<cublox::OccupancyGrid>(
         cublox_cfg.half_map_size, cublox_cfg.resolution,
         cublox_cfg.origin_at_center, cublox_cfg.recenter_threshold,
         Eigen::Vector3f::Zero());
 
     grid_->setMaxRaycastRange(cublox_cfg.max_raycast_range);
+    grid_->setLogOddsParams(cublox_cfg.l_hit, cublox_cfg.l_miss,
+                            cublox_cfg.l_min, cublox_cfg.l_max,
+                            cublox_cfg.l_free, cublox_cfg.l_occupied);
 
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
         odom_topic_, rclcpp::QoS(10),
@@ -201,8 +277,12 @@ public:
         std::bind(&CubloxDriver::pointCloudCallback, this,
                   std::placeholders::_1));
 
-    marker_pub_ = create_publisher<visualization_msgs::msg::MarkerArray>(
-        "/cublox/occupancy_markers", rclcpp::QoS(1).transient_local());
+    rclcpp::QoS viz_qos(1);
+    viz_qos.transient_local();
+    if (publish_occupancy_cloud_) {
+      occupancy_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+          "/cublox/occupancy_cloud", viz_qos);
+    }
 
     path_pub_ = create_publisher<nav_msgs::msg::Path>(
         "/cublox/odom_path", rclcpp::QoS(1).transient_local());
@@ -210,7 +290,7 @@ public:
     odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(
         "/cublox/odom", rclcpp::QoS(1).transient_local());
 
-    RCLCPP_INFO(get_logger(), "Loaded cublox config from %s; map_frame=%s",
+    RCLCPP_INFO(get_logger(), "Loaded cublox config from %s; map_frame=%s ",
                 config_file.c_str(), map_frame_.c_str());
 
     odom_path_.header.frame_id = map_frame_;
@@ -230,7 +310,7 @@ public:
 
   void run() {
 
-    if (shutdown_ || !rclcpp::ok()) {
+    if (!rclcpp::ok() || shutdown_) {
       return;
     }
     sensor_msgs::msg::PointCloud2::SharedPtr cloud;
@@ -261,10 +341,7 @@ public:
       return;
     }
 
-    const Eigen::Vector3f robot_pos(
-        static_cast<float>(odom->pose.pose.position.x),
-        static_cast<float>(odom->pose.pose.position.y),
-        static_cast<float>(odom->pose.pose.position.z));
+    const Eigen::Vector3f robot_pos = T_odom_to_base.translation();
 
     {
       std::lock_guard<std::mutex> grid_lock(grid_mutex_);
@@ -379,7 +456,7 @@ private:
 
       // Publish latest pose consumed
       if (!latest_odom) {
-        return;
+        continue;
       }
 
       odom_pub_->publish(*latest_odom);
@@ -390,39 +467,40 @@ private:
           static_cast<float>(latest_odom->pose.pose.position.x),
           static_cast<float>(latest_odom->pose.pose.position.y),
           static_cast<float>(latest_odom->pose.pose.position.z));
-      std::lock_guard<std::mutex> grid_lock(grid_mutex_);
-      publishOccupancyMarkersLocked(latest_pos);
+      if (publish_occupancy_cloud_ && occupancy_cloud_pub_) {
+        std::lock_guard<std::mutex> grid_lock(grid_mutex_);
+        publishOccupancyCloudLocked(latest_pos);
+      }
     }
   }
 
-  void publishOccupancyMarkersLocked(const Eigen::Vector3f &latest_pos) {
-    visualization_msgs::msg::MarkerArray arr;
-    visualization_msgs::msg::Marker del;
-    del.header.frame_id = map_frame_;
-    del.header.stamp = now();
-    del.ns = "cublox_occupancy";
-    del.id = 0;
-    del.action = visualization_msgs::msg::Marker::DELETEALL;
-    arr.markers.push_back(del);
-
-    visualization_msgs::msg::Marker cubes;
-    cubes.header.frame_id = map_frame_;
-    cubes.header.stamp = now();
-    cubes.ns = "cublox_occupancy";
-    cubes.id = 1;
-    cubes.type = visualization_msgs::msg::Marker::CUBE_LIST;
-    cubes.action = visualization_msgs::msg::Marker::ADD;
-    cubes.scale.x = grid_->config_.resolution;
-    cubes.scale.y = grid_->config_.resolution;
-    cubes.scale.z = grid_->config_.resolution;
-
+  void publishOccupancyCloudLocked(const Eigen::Vector3f &latest_pos) {
+    if (!occupancy_cloud_pub_) {
+      return;
+    }
     const int nv = grid_->config_.voxel_num;
-    std_msgs::msg::ColorRGBA c;
-    cubes.points.reserve(static_cast<size_t>(nv));
-    cubes.colors.reserve(static_cast<size_t>(nv));
+    const int step = occupancy_viz_subsample_;
+    const float ray_r = grid_->getMaxRaycastRange();
+
+    const size_t reserve_hint =
+        occupancy_viz_max_points_ > 0
+            ? static_cast<size_t>(std::min(occupancy_viz_max_points_, nv))
+            : std::min(static_cast<size_t>(nv), size_t(500000));
+    std::vector<float> interleaved;
+    interleaved.reserve(std::max(size_t(4096), reserve_hint) * 4);
+
     for (int hid = 0; hid < nv; ++hid) {
       if (!grid_->isOccupied(hid)) {
         continue;
+      }
+      if (step > 1) {
+        Eigen::Vector3i id_l;
+        cublox::hashIdToLocalIndex(hid, grid_->config_.map_size_i,
+                                   grid_->config_.half_map_size_i, id_l);
+        const Eigen::Vector3i cell = id_l + grid_->config_.half_map_size_i;
+        if ((cell.x() % step) || (cell.y() % step) || (cell.z() % step)) {
+          continue;
+        }
       }
 
       Eigen::Vector3f pos;
@@ -430,29 +508,45 @@ private:
                           grid_->config_.half_map_size_i,
                           grid_->getOriginIndex(), grid_->config_.resolution,
                           grid_->config_.origin_at_center, pos);
-      cubes.points.push_back(eigenToPoint(pos));
-
-      // Palette vs distance (meters): far → red, mid → blue, near → green.
-      const float d = (pos - latest_pos).norm();
-      const float d_max = std::max(grid_->getMaxRaycastRange(), 1.0f);
-      const float t = std::clamp(d / d_max, 0.0f, 1.0f);
-      if (t <= 0.5f) {
-        const float k = t * 2.0f; // green → blue
-        c.r = 0.0f;
-        c.g = 1.0f - k;
-        c.b = k;
-      } else {
-        const float k = (t - 0.5f) * 2.0f; // blue → red
-        c.r = k;
-        c.g = 0.0f;
-        c.b = 1.0f - k;
+      std_msgs::msg::ColorRGBA col;
+      distanceToOccupancyColor((pos - latest_pos).norm(), ray_r, col);
+      interleaved.push_back(pos.x());
+      interleaved.push_back(pos.y());
+      interleaved.push_back(pos.z());
+      interleaved.push_back(packRGBFloat(col));
+      if (occupancy_viz_max_points_ > 0 &&
+          static_cast<int>(interleaved.size() / 4) >=
+              occupancy_viz_max_points_) {
+        break;
       }
-      c.a = 1.0f;
-      cubes.colors.push_back(c);
     }
 
-    arr.markers.push_back(cubes);
-    marker_pub_->publish(arr);
+    const size_t npts = interleaved.size() / 4;
+    sensor_msgs::msg::PointCloud2 cloud_msg;
+    cloud_msg.header.frame_id = map_frame_;
+    cloud_msg.header.stamp = now();
+    cloud_msg.height = 1;
+    cloud_msg.width = static_cast<uint32_t>(npts);
+    cloud_msg.is_dense = false;
+    sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
+    modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
+    modifier.resize(npts);
+    sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
+    sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
+    sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
+    sensor_msgs::PointCloud2Iterator<float> iter_rgb(cloud_msg, "rgb");
+    for (size_t i = 0; i < npts; ++i) {
+      const size_t b = i * 4;
+      *iter_x = interleaved[b];
+      *iter_y = interleaved[b + 1];
+      *iter_z = interleaved[b + 2];
+      *iter_rgb = interleaved[b + 3];
+      ++iter_x;
+      ++iter_y;
+      ++iter_z;
+      ++iter_rgb;
+    }
+    occupancy_cloud_pub_->publish(cloud_msg);
   }
 
   std::unique_ptr<cublox::OccupancyGrid> grid_;
@@ -461,8 +555,6 @@ private:
   std::string map_frame_;
   std::string pointcloud_topic_;
   std::string odom_topic_;
-  std::string viz_topic_;
-  std::string path_topic_;
 
   std::mutex data_mutex_;
   std::mutex grid_mutex_;
@@ -477,13 +569,17 @@ private:
   std::atomic<bool> shutdown_{false};
   std::thread publish_thread_;
 
+  bool publish_occupancy_cloud_{true};
+  int occupancy_viz_subsample_{1};
+  int occupancy_viz_max_points_{0};
+
   // ROS Subscribers
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
 
   // ROS Publishers
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
-      marker_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
+      occupancy_cloud_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
   nav_msgs::msg::Path odom_path_;

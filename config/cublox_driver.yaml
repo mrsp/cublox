@@ -1,15 +1,15 @@
 # Pass this file via ROS param: config_file: <path>
 #
-# Frame used for markers and for interpreting odometry pose (typically "odom").
+# Frame used for published clouds and odometry (typically "odom").
 map_frame: odom
 pointcloud_topic: /pandar_points
 odom_topic: /applanix/lvx_client/odom
 
 # Half-extent in voxels on each axis from the sliding window origin (see Grid docs).
 half_map_size:
-  - 500
-  - 500
-  - 50
+  - 250
+  - 250
+  - 75
 
 resolution: 0.1 # meters
 origin_at_center: false # false: origin is at the bottom-left corner of the map
@@ -27,3 +27,15 @@ base_to_lidar:
     y: 0.0
     z: 0.99987200
     w: 0.01599934
+
+probabilities:
+  hit: 0.9
+  miss: 0.49
+  min: 0.12
+  max: 0.98
+  free: 0.499
+  occupied: 0.85
+  
+  publish_occupancy_cloud: true
+  viz_subsample: 50
+  viz_max_points: 500000
