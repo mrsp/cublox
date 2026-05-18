@@ -19,6 +19,9 @@ namespace cublox {
 
 __constant__ RayCastCfg c_cfg;
 
+// ─────────────────────────────────────────────────
+// 3D Fast Voxel Traversal  (Amanatides & Woo, 1987)
+// ─────────────────────────────────────────────────
 __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
                                     const float *__restrict__ cloud_y,
                                     const float *__restrict__ cloud_z,
@@ -30,10 +33,6 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
     return;
   }
 
-  // ─────────────────────────────────────────────────
-  // 3D Fast Voxel Traversal  (Amanatides & Woo, 1987)
-  // ─────────────────────────────────────────────────
-
   // ---- 1. load endpoint and origin (coalesced) ----
   float ex = cloud_x[tid], ey = cloud_y[tid], ez = cloud_z[tid];
   const float ox = c_cfg.origin.x, oy = c_cfg.origin.y, oz = c_cfg.origin.z;
@@ -44,6 +43,7 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
   if (L < 1e-6f) {
     return;
   }
+
   if (L > c_cfg.max_range) {
     const float s = c_cfg.max_range / L;
     ex = ox + dx * s;
@@ -134,7 +134,6 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
 // l_miss * op_count.
 //
 // After updating, counters zero for the next raycast pass.
-// TODO: detect from→to GridType jumps for inflation map (porting plan).
 // ─────────────────────────────────────────────────
 __global__ void applyUpdateKernel(
     float *__restrict__ occ, int *__restrict__ op_cnt,
@@ -156,7 +155,6 @@ __global__ void applyUpdateKernel(
   const int hit = hit_cnt[h];
   const float stored0 = occ[h];
   float logit = stored0 + l_unknown;
-
   if (hit > 0) {
     logit += l_hit * static_cast<float>(hit);
     if (logit > l_max) {
@@ -187,7 +185,7 @@ __global__ void applyUpdateKernel(
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Host-side launcher (matches the declaration in raycast_kernels.hpp).
+// Host-side launcher (matches the declaration in kernels.hpp).
 //
 // We push `cfg` into __constant__ memory on the same stream as the
 // kernel launch so the H2D copy and the kernel are ordered correctly
@@ -245,7 +243,7 @@ void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
 
 // ─────────────────────────────────────────────────────────────────────
 // clearVoxelsByIndexKernel — map sliding: reset many scattered voxels in
-// one launch (avoids one cudaMemset per voxel).
+// one launch.
 // ─────────────────────────────────────────────────────────────────────
 __global__ void clearVoxelsByIndexKernel(float *__restrict__ occ,
                                          const int *__restrict__ indices,
@@ -276,17 +274,18 @@ void launchClearVoxelsByIndex(float *d_occ, const int *d_indices, const int n,
 // Recenter slab clear — one thread per row along fastest (z) or strided
 // (y) index so inner loops touch contiguous / regular d_occ[] addresses.
 // ─────────────────────────────────────────────────────────────────────
-__global__ void clearRecenterSlabAxis0Kernel(float *__restrict__ occ, int3 ms,
-                                             int3 hs,
+__global__ void clearRecenterSlabAxis0Kernel(float *__restrict__ occ,
+                                             const int3 &ms, const int3 &hs,
                                              const int *__restrict__ d_vals,
-                                             int n_slices) {
+                                             const int n_slices) {
   const int ny = ms.y;
-  const int nz = ms.z;
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
   const int n_rows = n_slices * ny;
   if (tid >= n_rows) {
     return;
   }
+
+  const int nz = ms.z;
   const int si = tid / ny;
   const int iy_raw = tid % ny;
   const int lx = d_vals[si];
@@ -299,17 +298,18 @@ __global__ void clearRecenterSlabAxis0Kernel(float *__restrict__ occ, int3 ms,
   }
 }
 
-__global__ void clearRecenterSlabAxis1Kernel(float *__restrict__ occ, int3 ms,
-                                             int3 hs,
+__global__ void clearRecenterSlabAxis1Kernel(float *__restrict__ occ,
+                                             const int3 &ms, const int3 &hs,
                                              const int *__restrict__ d_vals,
-                                             int n_slices) {
+                                             const int n_slices) {
   const int nx = ms.x;
-  const int nz = ms.z;
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
   const int n_rows = n_slices * nx;
   if (tid >= n_rows) {
     return;
   }
+
+  const int nz = ms.z;
   const int si = tid / nx;
   const int ix_raw = tid % nx;
   const int lx = ix_raw - hs.x;
@@ -322,18 +322,19 @@ __global__ void clearRecenterSlabAxis1Kernel(float *__restrict__ occ, int3 ms,
   }
 }
 
-__global__ void clearRecenterSlabAxis2Kernel(float *__restrict__ occ, int3 ms,
-                                             int3 hs,
+__global__ void clearRecenterSlabAxis2Kernel(float *__restrict__ occ,
+                                             const int3 &ms, const int3 &hs,
                                              const int *__restrict__ d_vals,
-                                             int n_slices) {
+                                             const int n_slices) {
   const int nx = ms.x;
-  const int ny = ms.y;
-  const int nz = ms.z;
   const int tid = blockIdx.x * blockDim.x + threadIdx.x;
   const int n_rows = n_slices * nx;
   if (tid >= n_rows) {
     return;
   }
+
+  const int ny = ms.y;
+  const int nz = ms.z;
   const int si = tid / nx;
   const int ix_raw = tid % nx;
   const int lx = ix_raw - hs.x;
@@ -354,6 +355,7 @@ void launchClearRecenterSlabsForAxis(float *d_occ, const int3 &map_size_i,
   if (n_slices <= 0 || d_occ == nullptr || d_slice_local_values == nullptr) {
     return;
   }
+
   constexpr int kBlock = 256;
   int n_threads = 0;
   if (axis == 0) {
@@ -363,6 +365,7 @@ void launchClearRecenterSlabsForAxis(float *d_occ, const int3 &map_size_i,
   } else {
     n_threads = n_slices * map_size_i.x;
   }
+
   const int grid_dim = (n_threads + kBlock - 1) / kBlock;
   if (axis == 0) {
     clearRecenterSlabAxis0Kernel<<<grid_dim, kBlock, 0, stream>>>(

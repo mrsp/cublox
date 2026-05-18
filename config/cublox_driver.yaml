@@ -6,6 +6,8 @@ pointcloud_topic: /pandar_points
 odom_topic: /applanix/lvx_client/odom
 
 # Half-extent in voxels on each axis from the sliding window origin (see Grid docs).
+# A config of [250, 250, 75] corresponds to a 500 x 500 x 150 voxel map and will allocate
+# ~750MBs on the GPU to use efficiently and a 4.5KBs of pinned RAM.
 half_map_size:
   - 250
   - 250
@@ -16,7 +18,6 @@ origin_at_center: false # false: origin is at the bottom-left corner of the map
 
 # Set to null or omit to disable recenter threshold behavior.
 recenter_threshold: 5.0 # meters
-
 max_raycast_range: 25.0 # meters
 
 # Static transform from base frame to lidar frame
@@ -36,6 +37,6 @@ probabilities:
   free: 0.499
   occupied: 0.85
   
-  publish_occupancy_cloud: true
-  viz_subsample: 50
-  viz_max_points: 500000
+publish_occupancy_cloud: true
+viz_subsample: 50
+viz_max_points: 500000

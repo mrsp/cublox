@@ -27,19 +27,19 @@ class OccupancyGrid : public Grid {
 public:
   enum class VoxelState {
     UNKNOWN = 0,
-    KNOWN_FREE = 1,
+    FREE = 1,
     OCCUPIED = 2,
   };
 
-  OccupancyGrid(const Eigen::Vector3i &half_map_size_i, float resolution,
-                bool origin_at_center, std::optional<double> recenter_threshold,
+  OccupancyGrid(const Eigen::Vector3i &half_map_size_i, const float resolution,
+                const bool origin_at_center,
+                const std::optional<double> recenter_threshold,
                 const Eigen::Vector3f &origin = Eigen::Vector3f::Zero());
   OccupancyGrid() = default;
-
   ~OccupancyGrid();
 
   void reset() override;
-  void resetVoxel(const int &hash_id) override;
+  void resetVoxel(const int hash_id) override;
   void resetVoxels(const std::vector<int> &hash_ids) override;
   void clearRecenterExitSlabs(const std::vector<int> &x_slices,
                               const std::vector<int> &y_slices,
@@ -49,16 +49,14 @@ public:
   void update(const PointCloud &input_cloud,
               const Eigen::Vector3f &sensor_origin);
 
-  // Knobs that will eventually move into a proper Config. Inline so the
-  // call site stays cheap and so we don't drag a translation unit into a
-  // setter that's literally one store.
-  void setMaxRaycastRange(const float range) { max_raycast_range_ = range; }
-  float getMaxRaycastRange() const { return max_raycast_range_; }
+  // Default: 25m. Call this once during setup.
+  inline void setMaxRaycastRange(const float range) {
+    max_raycast_range_ = range;
+  }
+  inline float getMaxRaycastRange() const { return max_raycast_range_; }
 
-  // Log-odds increments / clamps passed to applyUpdateKernel each frame.
   // Defaults values are (p_hit=0.70, p_miss=0.40, p_min=0.12, p_max=0.97). Call
-  // this once during setup, or pass the logits directly if you've already
-  // computed them.
+  // this once during setup
   void setLogOddsParams(const float l_hit, const float l_miss,
                         const float l_min, const float l_max,
                         const float l_free, const float l_occupied) {
@@ -73,45 +71,46 @@ public:
 
   bool isOccupied(const Eigen::Vector3f &pos) const;
   bool isUnknown(const Eigen::Vector3f &pos) const;
-  bool isKnownFree(const Eigen::Vector3f &pos) const;
+  bool isFree(const Eigen::Vector3f &pos) const;
   bool isOccupied(const Eigen::Vector3i &id_g) const;
   bool isUnknown(const Eigen::Vector3i &id_g) const;
-  bool isKnownFree(const Eigen::Vector3i &id_g) const;
+  bool isFree(const Eigen::Vector3i &id_g) const;
   bool isOccupied(const int hash_id) const;
   bool isUnknown(const int hash_id) const;
-  bool isKnownFree(const int hash_id) const;
+  bool isFree(const int hash_id) const;
 
 private:
   bool first_run_{true};
 
   // Buffer holds zero-centered logits: stored == logit - l_unknown_. Unknown
   // prior is stored == 0 (cudaMemset-friendly); decode with + l_unknown_.
-  float storedToLogit_(float s) const noexcept { return s + l_unknown_; }
-  bool occOccupied_(float s) const noexcept {
-    return storedToLogit_(s) >= l_occupied_;
+  float storedToLogit(const float s) const noexcept { return s + l_unknown_; }
+  bool occOccupied(const float s) const noexcept {
+    return storedToLogit(s) >= l_occupied_;
   }
-  bool occKnownFree_(float s) const noexcept {
-    return storedToLogit_(s) < l_free_;
+  bool occFree(const float s) const noexcept {
+    return storedToLogit(s) < l_free_;
   }
-  bool occUnknown_(float s) const noexcept {
-    const float l = storedToLogit_(s);
+  bool occUnknown(const float s) const noexcept {
+    const float l = storedToLogit(s);
     return l >= l_free_ && l < l_occupied_;
   }
 
   // Grow d_cloud_{x,y,z}_ to hold at least `n` points. Cheap no-op when
   // capacity already suffices.
-  void ensureCloudCapacity_(int n);
+  void ensureCloudCapacity(const int n);
 
   // Host + device voxel buffers; called from the sized constructor when
   // config_.voxel_num > 0. Rolls back partial CUDA allocations on failure.
-  void allocateVoxelBuffers_();
+  void allocateVoxelBuffers();
 
   // Host-side mirror of d_occ_. Updated incrementally from GPU modified lists
   // inside update() instead of copying the entire volume each frame.
   std::vector<float> occupancy_buffer_;
 
-  // GPU + host staging for voxels whose log-odds change in applyUpdateKernel.
-  // Capacity equals voxel_num (at most one list entry per voxel per frame).
+  // Device + host staging for voxels whose log-odds change in
+  // applyUpdateKernel. Capacity equals voxel_num (at most one list entry per
+  // voxel per frame).
   unsigned int *d_modified_count_{nullptr};
   int *d_modified_idx_{nullptr};
   float *d_modified_val_{nullptr};
@@ -119,7 +118,7 @@ private:
   std::vector<float> h_modified_val_;
 
   // Per-voxel atomics buffers, allocated in the sized constructor.
-  // Sized to config_.voxel_num once.
+  // Sized to config_.voxel_num once in allocateVoxelBuffers.
   int *d_op_cnt_{nullptr};
   int *d_hit_cnt_{nullptr};
 
@@ -133,10 +132,11 @@ private:
   cudaStream_t recenter_stream_[3]{nullptr, nullptr, nullptr};
   int *d_recenter_slices_[3]{nullptr, nullptr, nullptr};
   // Page-locked host staging for slice IDs (true async cudaMemcpyAsync H2D).
+  // Uses pinned host memory.
   int *h_recenter_slices_pin_[3]{nullptr, nullptr, nullptr};
 
   // SoA device-side mirror of the input cloud. Reused across frames;
-  // grown by ensureCloudCapacity_ on demand.
+  // grown by ensureCloudCapacity on demand.
   float *d_cloud_x_{nullptr};
   float *d_cloud_y_{nullptr};
   float *d_cloud_z_{nullptr};

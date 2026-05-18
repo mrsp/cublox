@@ -35,7 +35,7 @@ public:
   void recenter(const Eigen::Vector3f &pos);
 
   virtual void reset() = 0;
-  virtual void resetVoxel(const int &hash_id) = 0;
+  virtual void resetVoxel(const int hash_id) = 0;
   virtual void resetVoxels(const std::vector<int> &hash_ids);
   // After a sliding-window recenter: zero voxels on exiting slabs. Default
   // expands slabs to hash IDs on the CPU; OccupancyGrid overrides with a GPU

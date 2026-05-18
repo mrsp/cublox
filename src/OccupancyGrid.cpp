@@ -50,14 +50,17 @@ size_t upperBoundSlabTouches(const Grid::Config &cfg,
     v += x_slices.size() * static_cast<size_t>(cfg.map_size_i.y()) *
          static_cast<size_t>(cfg.map_size_i.z());
   }
+
   if (!y_slices.empty()) {
     v += y_slices.size() * static_cast<size_t>(cfg.map_size_i.x()) *
          static_cast<size_t>(cfg.map_size_i.z());
   }
+
   if (!z_slices.empty()) {
     v += z_slices.size() * static_cast<size_t>(cfg.map_size_i.x()) *
          static_cast<size_t>(cfg.map_size_i.y());
   }
+
   return v;
 }
 
@@ -91,6 +94,7 @@ void zeroHostMirrorSlabs(std::vector<float> &occ, const Grid::Config &cfg,
       }
     }
   };
+
   per_axis(x_slices, 0);
   per_axis(y_slices, 1);
   per_axis(z_slices, 2);
@@ -98,9 +102,11 @@ void zeroHostMirrorSlabs(std::vector<float> &occ, const Grid::Config &cfg,
 
 } // namespace
 
+// ─── public interface ────────────────────────────────────────────────────
 OccupancyGrid::OccupancyGrid(const Eigen::Vector3i &half_map_size_i,
-                             float resolution, bool origin_at_center,
-                             std::optional<double> recenter_threshold,
+                             const float resolution,
+                             const bool origin_at_center,
+                             const std::optional<double> recenter_threshold,
                              const Eigen::Vector3f &origin)
     : Grid(half_map_size_i, resolution, recenter_threshold, origin_at_center) {
   Eigen::Vector3i origin_i;
@@ -108,7 +114,7 @@ OccupancyGrid::OccupancyGrid(const Eigen::Vector3i &half_map_size_i,
                    origin_i);
   const Eigen::Vector3f origin_d = origin_i.cast<float>() * config_.resolution;
   updateOriginAndBound(origin_d, origin_i);
-  allocateVoxelBuffers_();
+  allocateVoxelBuffers();
 }
 
 OccupancyGrid::~OccupancyGrid() {
@@ -169,11 +175,12 @@ void OccupancyGrid::reset() {
   // Stored unknown prior == 0 (decodes to (l_free + l_occ)/2 via + l_unknown_).
   std::fill(occupancy_buffer_.begin(), occupancy_buffer_.end(), 0.0f);
 
-  // Default-constructed grid: no voxel storage. Sized grid: ctor allocated
-  // device buffers whenever voxel_num > 0.
+  // Default-constructed grid: no voxel storage. Sized grid:
+  // allocateVoxelBuffers allocated device buffers whenever voxel_num > 0.
   if (d_occ_ == nullptr) {
     return;
   }
+
   const size_t n = static_cast<size_t>(config_.voxel_num);
   CUDA_OK(cudaMemset(d_occ_, 0, n * sizeof(float)));
   CUDA_OK(cudaMemset(d_op_cnt_, 0, n * sizeof(int)));
@@ -183,7 +190,7 @@ void OccupancyGrid::reset() {
   }
 }
 
-void OccupancyGrid::resetVoxel(const int &hash_id) {
+void OccupancyGrid::resetVoxel(const int hash_id) {
   if (hash_id < 0 || hash_id >= static_cast<int>(occupancy_buffer_.size())) {
     return;
   }
@@ -200,7 +207,7 @@ void OccupancyGrid::resetVoxels(const std::vector<int> &hash_ids) {
   }
 
   const size_t buf_sz = occupancy_buffer_.size();
-  for (int h : hash_ids) {
+  for (const int h : hash_ids) {
     if (h >= 0 && static_cast<size_t>(h) < buf_sz) {
       occupancy_buffer_[static_cast<size_t>(h)] = 0.0f;
     }
@@ -250,7 +257,7 @@ void OccupancyGrid::clearRecenterExitSlabs(const std::vector<int> &x_slices,
       return;
     }
     const int n = static_cast<int>(slices.size());
-    cudaStream_t st = recenter_stream_[axis];
+    const cudaStream_t st = recenter_stream_[axis];
     std::memcpy(h_recenter_slices_pin_[axis], slices.data(),
                 static_cast<size_t>(n) * sizeof(int));
     CUDA_OK(cudaMemcpyAsync(
@@ -265,9 +272,6 @@ void OccupancyGrid::clearRecenterExitSlabs(const std::vector<int> &x_slices,
   issue(z_slices, 2);
   CUDA_OK(cudaDeviceSynchronize());
 
-  // Full map is ~4e8 B for your default YAML; D2H that every recenter costs
-  // tens of ms. When few voxels touched, mirror the exiting slabs only
-  // (unknown prior).
   const size_t slab_ub =
       upperBoundSlabTouches(config_, x_slices, y_slices, z_slices);
   const size_t d2h_threshold =
@@ -282,7 +286,165 @@ void OccupancyGrid::clearRecenterExitSlabs(const std::vector<int> &x_slices,
   }
 }
 
-void OccupancyGrid::allocateVoxelBuffers_() {
+void OccupancyGrid::update(const PointCloud &cloud,
+                           const Eigen::Vector3f &sensor_origin) {
+  if (config_.voxel_num <= 0) {
+    // Grid hasn't been sized yet (default-constructed).
+    return;
+  }
+
+  const int n = static_cast<int>(cloud.rows());
+  if (n <= 0) {
+    // Empty cloud. Nothing to do.
+    return;
+  }
+
+  if (first_run_) {
+    if (config_.recenter_threshold) {
+      Eigen::Vector3i origin_i;
+      posToGlobalIndex(sensor_origin, config_.resolution_inv,
+                       config_.origin_at_center, origin_i);
+      updateOriginAndBound(sensor_origin, origin_i);
+    }
+    first_run_ = false;
+  }
+
+  ensureCloudCapacity(n);
+
+  // Eigen::Matrix<float, Dynamic, 3> defaults to column-major, so each
+  // .col(i).data() is a contiguous run of `rows()` floats — exactly what
+  // we need for a one-shot cudaMemcpy per axis.
+  const size_t bytes = static_cast<size_t>(n) * sizeof(float);
+  CUDA_OK(cudaMemcpyAsync(d_cloud_x_, cloud.col(0).data(), bytes,
+                          cudaMemcpyHostToDevice, /*stream=*/0));
+  CUDA_OK(cudaMemcpyAsync(d_cloud_y_, cloud.col(1).data(), bytes,
+                          cudaMemcpyHostToDevice, /*stream=*/0));
+  CUDA_OK(cudaMemcpyAsync(d_cloud_z_, cloud.col(2).data(), bytes,
+                          cudaMemcpyHostToDevice, /*stream=*/0));
+
+  // Build the per-frame kernel config. Eigen -> int3/float3 conversion
+  // is done here (host-only) so utils.cuh keeps its current shape.
+  RayCastCfg cfg{};
+  cfg.origin =
+      make_float3(sensor_origin.x(), sensor_origin.y(), sensor_origin.z());
+  cfg.map_size_i = make_int3(config_.map_size_i.x(), config_.map_size_i.y(),
+                             config_.map_size_i.z());
+  cfg.half_map_size_i =
+      make_int3(config_.half_map_size_i.x(), config_.half_map_size_i.y(),
+                config_.half_map_size_i.z());
+  cfg.resolution = config_.resolution;
+  cfg.inv_resolution = config_.resolution_inv;
+  cfg.max_range = max_raycast_range_;
+  cfg.map_vox_num = config_.voxel_num;
+
+  // Pass 1: walk every ray, atomic-increment op_cnt per voxel and
+  // hit_cnt at endpoints.
+  launchRayCastUpdate(cfg, d_cloud_x_, d_cloud_y_, d_cloud_z_, n, /*stream=*/0,
+                      d_op_cnt_, d_hit_cnt_);
+  CUDA_OK(cudaMemsetAsync(d_modified_count_, 0, sizeof(unsigned int),
+                          /*stream=*/0));
+
+  // Pass 2: fold counters into d_occ_; record voxels whose log-odds change.
+  launchApplyUpdate(d_occ_, d_op_cnt_, d_hit_cnt_, config_.voxel_num, l_hit_,
+                    l_miss_, l_min_, l_max_, l_unknown_, /*stream=*/0,
+                    d_modified_count_, d_modified_idx_, d_modified_val_,
+                    static_cast<unsigned int>(config_.voxel_num));
+  CUDA_OK(cudaDeviceSynchronize());
+
+  // Copy the modified voxels to the host occupancy buffer.
+  unsigned int modified_n = 0;
+  CUDA_OK(cudaMemcpy(&modified_n, d_modified_count_, sizeof(unsigned int),
+                     cudaMemcpyDeviceToHost));
+  modified_n =
+      std::min(modified_n, static_cast<unsigned int>(config_.voxel_num));
+  if (modified_n > 0) {
+    CUDA_OK(cudaMemcpy(h_modified_idx_.data(), d_modified_idx_,
+                       static_cast<size_t>(modified_n) * sizeof(int),
+                       cudaMemcpyDeviceToHost));
+    CUDA_OK(cudaMemcpy(h_modified_val_.data(), d_modified_val_,
+                       static_cast<size_t>(modified_n) * sizeof(float),
+                       cudaMemcpyDeviceToHost));
+
+    for (unsigned int i = 0; i < modified_n; ++i) {
+      const int hid = h_modified_idx_[static_cast<size_t>(i)];
+      if (hid >= 0 && hid < config_.voxel_num) {
+        occupancy_buffer_[static_cast<size_t>(hid)] =
+            h_modified_val_[static_cast<size_t>(i)];
+      }
+    }
+  }
+}
+
+bool OccupancyGrid::isOccupied(const Eigen::Vector3f &pos) const {
+  if (!inside(pos)) {
+    return false;
+  }
+  return occOccupied(occupancy_buffer_[posToHashIndex(
+      pos, config_.map_size_i, config_.half_map_size_i, config_.resolution_inv,
+      config_.origin_at_center)]);
+}
+
+bool OccupancyGrid::isUnknown(const Eigen::Vector3f &pos) const {
+  if (!inside(pos)) {
+    return true;
+  }
+
+  return occUnknown(occupancy_buffer_[posToHashIndex(
+      pos, config_.map_size_i, config_.half_map_size_i, config_.resolution_inv,
+      config_.origin_at_center)]);
+}
+
+bool OccupancyGrid::isFree(const Eigen::Vector3f &pos) const {
+  if (!inside(pos)) {
+    return false;
+  }
+
+  return occFree(occupancy_buffer_[posToHashIndex(
+      pos, config_.map_size_i, config_.half_map_size_i, config_.resolution_inv,
+      config_.origin_at_center)]);
+}
+
+bool OccupancyGrid::isOccupied(const Eigen::Vector3i &id_g) const {
+  if (!inside(id_g)) {
+    return false;
+  }
+
+  return occOccupied(occupancy_buffer_[globalIndexToHashId(
+      id_g, config_.map_size_i, config_.half_map_size_i)]);
+}
+
+bool OccupancyGrid::isUnknown(const Eigen::Vector3i &id_g) const {
+  if (!inside(id_g)) {
+    return true;
+  }
+
+  return occUnknown(occupancy_buffer_[globalIndexToHashId(
+      id_g, config_.map_size_i, config_.half_map_size_i)]);
+}
+
+bool OccupancyGrid::isFree(const Eigen::Vector3i &id_g) const {
+  if (!inside(id_g)) {
+    return false;
+  }
+
+  return occFree(occupancy_buffer_[globalIndexToHashId(
+      id_g, config_.map_size_i, config_.half_map_size_i)]);
+}
+
+bool OccupancyGrid::isOccupied(const int hash_id) const {
+  return occOccupied(occupancy_buffer_[hash_id]);
+}
+
+bool OccupancyGrid::isUnknown(const int hash_id) const {
+  return occUnknown(occupancy_buffer_[hash_id]);
+}
+
+bool OccupancyGrid::isFree(const int hash_id) const {
+  return occFree(occupancy_buffer_[hash_id]);
+}
+
+// ─── private interface ────────────────────────────────────────────────────
+void OccupancyGrid::allocateVoxelBuffers() {
   const size_t n = static_cast<size_t>(config_.voxel_num);
   if (n == 0) {
     return;
@@ -304,6 +466,7 @@ void OccupancyGrid::allocateVoxelBuffers_() {
     CUDA_OK(cudaMemset(d_hit_cnt_, 0, int_bytes));
     CUDA_OK(cudaMemset(d_occ_, 0, flt_bytes));
     CUDA_OK(cudaMemset(d_modified_count_, 0, sizeof(unsigned int)));
+
     h_modified_idx_.resize(n);
     h_modified_val_.resize(n);
     for (int a = 0; a < 3; ++a) {
@@ -355,11 +518,12 @@ void OccupancyGrid::allocateVoxelBuffers_() {
     h_modified_idx_.clear();
     h_modified_val_.clear();
     occupancy_buffer_.clear();
-    throw;
+    throw std::runtime_error(
+        "cublox::OccupancyGrid: failed to allocate voxel buffers");
   }
 }
 
-void OccupancyGrid::ensureCloudCapacity_(int n) {
+void OccupancyGrid::ensureCloudCapacity(const int n) {
   if (n <= cloud_capacity_) {
     return;
   }
@@ -368,171 +532,12 @@ void OccupancyGrid::ensureCloudCapacity_(int n) {
     CUDA_OK(cudaFree(d_cloud_y_));
     CUDA_OK(cudaFree(d_cloud_z_));
   }
+
   cloud_capacity_ = n;
   const size_t bytes = static_cast<size_t>(cloud_capacity_) * sizeof(float);
   CUDA_OK(cudaMalloc(&d_cloud_x_, bytes));
   CUDA_OK(cudaMalloc(&d_cloud_y_, bytes));
   CUDA_OK(cudaMalloc(&d_cloud_z_, bytes));
-}
-
-void OccupancyGrid::update(const PointCloud &cloud,
-                           const Eigen::Vector3f &sensor_origin) {
-  if (config_.voxel_num <= 0) {
-    // Grid hasn't been sized yet (default-constructed).
-    return;
-  }
-
-  const int n = static_cast<int>(cloud.rows());
-  if (n <= 0) {
-    return;
-  }
-
-  if (first_run_) {
-    if (config_.recenter_threshold) {
-      Eigen::Vector3i origin_i;
-      posToGlobalIndex(sensor_origin, config_.resolution_inv,
-                       config_.origin_at_center, origin_i);
-      updateOriginAndBound(sensor_origin, origin_i);
-    }
-    first_run_ = false;
-  }
-
-  ensureCloudCapacity_(n);
-
-  // Eigen::Matrix<float, Dynamic, 3> defaults to column-major, so each
-  // .col(i).data() is a contiguous run of `rows()` floats — exactly what
-  // we need for a one-shot cudaMemcpy per axis.
-  const size_t bytes = static_cast<size_t>(n) * sizeof(float);
-  CUDA_OK(cudaMemcpyAsync(d_cloud_x_, cloud.col(0).data(), bytes,
-                          cudaMemcpyHostToDevice, /*stream=*/0));
-  CUDA_OK(cudaMemcpyAsync(d_cloud_y_, cloud.col(1).data(), bytes,
-                          cudaMemcpyHostToDevice, /*stream=*/0));
-  CUDA_OK(cudaMemcpyAsync(d_cloud_z_, cloud.col(2).data(), bytes,
-                          cudaMemcpyHostToDevice, /*stream=*/0));
-
-  // Build the per-frame kernel config. Eigen -> int3/float3 conversion
-  // is done here (host-only) so utils.cuh keeps its current shape.
-  RayCastCfg cfg{};
-  cfg.origin =
-      make_float3(sensor_origin.x(), sensor_origin.y(), sensor_origin.z());
-  cfg.map_size_i = make_int3(config_.map_size_i.x(), config_.map_size_i.y(),
-                             config_.map_size_i.z());
-  cfg.half_map_size_i =
-      make_int3(config_.half_map_size_i.x(), config_.half_map_size_i.y(),
-                config_.half_map_size_i.z());
-  cfg.resolution = config_.resolution;
-  cfg.inv_resolution = config_.resolution_inv;
-  cfg.max_range = max_raycast_range_;
-  cfg.map_vox_num = config_.voxel_num;
-
-  // Pass 1: walk every ray, atomic-increment op_cnt per voxel and
-  // hit_cnt at endpoints.
-  launchRayCastUpdate(cfg, d_cloud_x_, d_cloud_y_, d_cloud_z_, n, /*stream=*/0,
-                      d_op_cnt_, d_hit_cnt_);
-
-  CUDA_OK(cudaMemsetAsync(d_modified_count_, 0, sizeof(unsigned int),
-                          /*stream=*/0));
-
-  // Pass 2: fold counters into d_occ_; record voxels whose log-odds change.
-  launchApplyUpdate(d_occ_, d_op_cnt_, d_hit_cnt_, config_.voxel_num, l_hit_,
-                    l_miss_, l_min_, l_max_, l_unknown_, /*stream=*/0,
-                    d_modified_count_, d_modified_idx_, d_modified_val_,
-                    static_cast<unsigned int>(config_.voxel_num));
-
-  CUDA_OK(cudaDeviceSynchronize());
-
-  unsigned int modified_n = 0;
-  CUDA_OK(cudaMemcpy(&modified_n, d_modified_count_, sizeof(unsigned int),
-                     cudaMemcpyDeviceToHost));
-
-  modified_n =
-      std::min(modified_n, static_cast<unsigned int>(config_.voxel_num));
-  if (modified_n > 0) {
-    CUDA_OK(cudaMemcpy(h_modified_idx_.data(), d_modified_idx_,
-                       static_cast<size_t>(modified_n) * sizeof(int),
-                       cudaMemcpyDeviceToHost));
-    CUDA_OK(cudaMemcpy(h_modified_val_.data(), d_modified_val_,
-                       static_cast<size_t>(modified_n) * sizeof(float),
-                       cudaMemcpyDeviceToHost));
-
-    for (unsigned int i = 0U; i < modified_n; ++i) {
-      const int hid = h_modified_idx_[static_cast<size_t>(i)];
-      if (hid >= 0 && hid < config_.voxel_num) {
-        occupancy_buffer_[static_cast<size_t>(hid)] =
-            h_modified_val_[static_cast<size_t>(i)];
-      }
-    }
-  }
-}
-
-// ─── public is*() queries ────────────────────────────────────────────────────
-
-bool OccupancyGrid::isOccupied(const Eigen::Vector3f &pos) const {
-  if (!inside(pos)) {
-    return false;
-  }
-  return occOccupied_(occupancy_buffer_[posToHashIndex(
-      pos, config_.map_size_i, config_.half_map_size_i, config_.resolution_inv,
-      config_.origin_at_center)]);
-}
-
-bool OccupancyGrid::isUnknown(const Eigen::Vector3f &pos) const {
-  if (!inside(pos)) {
-    return true;
-  }
-
-  return occUnknown_(occupancy_buffer_[posToHashIndex(
-      pos, config_.map_size_i, config_.half_map_size_i, config_.resolution_inv,
-      config_.origin_at_center)]);
-}
-
-bool OccupancyGrid::isKnownFree(const Eigen::Vector3f &pos) const {
-  if (!inside(pos)) {
-    return false;
-  }
-
-  return occKnownFree_(occupancy_buffer_[posToHashIndex(
-      pos, config_.map_size_i, config_.half_map_size_i, config_.resolution_inv,
-      config_.origin_at_center)]);
-}
-
-bool OccupancyGrid::isOccupied(const Eigen::Vector3i &id_g) const {
-  if (!inside(id_g)) {
-    return false;
-  }
-
-  return occOccupied_(occupancy_buffer_[globalIndexToHashId(
-      id_g, config_.map_size_i, config_.half_map_size_i)]);
-}
-
-bool OccupancyGrid::isUnknown(const Eigen::Vector3i &id_g) const {
-  if (!inside(id_g)) {
-    return true;
-  }
-
-  return occUnknown_(occupancy_buffer_[globalIndexToHashId(
-      id_g, config_.map_size_i, config_.half_map_size_i)]);
-}
-
-bool OccupancyGrid::isKnownFree(const Eigen::Vector3i &id_g) const {
-  if (!inside(id_g)) {
-    return false;
-  }
-
-  return occKnownFree_(occupancy_buffer_[globalIndexToHashId(
-      id_g, config_.map_size_i, config_.half_map_size_i)]);
-}
-
-bool OccupancyGrid::isOccupied(const int hash_id) const {
-  return occOccupied_(occupancy_buffer_[hash_id]);
-}
-
-bool OccupancyGrid::isUnknown(const int hash_id) const {
-  return occUnknown_(occupancy_buffer_[hash_id]);
-}
-
-bool OccupancyGrid::isKnownFree(const int hash_id) const {
-  return occKnownFree_(occupancy_buffer_[hash_id]);
 }
 
 } // namespace cublox
