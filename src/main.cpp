@@ -1,3 +1,16 @@
+/**
+ * Copyright (C) Stylianos Piperakis, Ownage Dynamics L.P.
+ * cublox is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License as published by the Free Software
+ * Foundation, version 3.
+ *
+ * cublox is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+ * A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * cublox. If not, see <https://www.gnu.org/licenses/>.
+ **/
 #include <cublox/OccupancyGrid.hpp>
 #include <cublox/utils.hpp>
 
@@ -48,7 +61,6 @@ struct CubloxConfig {
   std::string map_frame{"odom"};
   std::string pointcloud_topic{"/points"};
   std::string odom_topic{"/odom"};
-  // Published every grid update, regardless of publish_occupancy_cloud.
   bool publish_occupancy_cloud{true};
   int occupancy_viz_subsample{1};
   int occupancy_viz_max_points{100000};
@@ -90,7 +102,7 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
   } else {
     int hx = 32;
     int hy = 32;
-    int hz = 8;
+    int hz = 12;
     if (root["half_map_size_x"]) {
       hx = root["half_map_size_x"].as<int>();
     }
@@ -110,10 +122,7 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
     cfg.origin_at_center = root["origin_at_center"].as<bool>();
   }
   if (root["recenter_threshold"] && !root["recenter_threshold"].IsNull()) {
-    const double r = root["recenter_threshold"].as<double>();
-    if (r >= 0.0) {
-      cfg.recenter_threshold = r;
-    }
+    cfg.recenter_threshold = root["recenter_threshold"].as<double>();
   }
   if (root["max_raycast_range"]) {
     cfg.max_raycast_range = root["max_raycast_range"].as<float>();
@@ -249,10 +258,10 @@ public:
     }
 
     const CubloxConfig cublox_cfg = loadConfigFromYaml(config_file);
-    T_base_to_lidar_ = cublox_cfg.T_base_to_lidar;
     map_frame_ = cublox_cfg.map_frame;
     pointcloud_topic_ = cublox_cfg.pointcloud_topic;
     odom_topic_ = cublox_cfg.odom_topic;
+    T_base_to_lidar_ = cublox_cfg.T_base_to_lidar;
 
     publish_occupancy_cloud_ = cublox_cfg.publish_occupancy_cloud;
     occupancy_viz_subsample_ = cublox_cfg.occupancy_viz_subsample;
@@ -309,10 +318,10 @@ public:
   }
 
   void run() {
-
     if (!rclcpp::ok() || shutdown_) {
       return;
     }
+
     sensor_msgs::msg::PointCloud2::SharedPtr cloud;
     nav_msgs::msg::Odometry::SharedPtr odom;
     {
@@ -342,7 +351,6 @@ public:
     }
 
     const Eigen::Vector3f robot_pos = T_odom_to_base.translation();
-
     {
       std::lock_guard<std::mutex> grid_lock(grid_mutex_);
       const auto t0 = std::chrono::steady_clock::now();
@@ -365,7 +373,6 @@ public:
       geometry_msgs::msg::PoseStamped ps;
       ps.header = odom->header;
       ps.pose = odom->pose.pose;
-
       odom_path_.poses.push_back(std::move(ps));
       constexpr size_t kPathCap = 512;
       if (odom_path_.poses.size() > kPathCap) {
@@ -418,6 +425,7 @@ private:
       if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
         continue;
       }
+
       if (std::abs(x) > max_range || std::abs(y) > max_range ||
           std::abs(z) > max_range) {
         continue;
@@ -438,23 +446,24 @@ private:
   }
 
   void publishLoop() {
-    while (!shutdown_ && rclcpp::ok()) {
+    while (rclcpp::ok() && !shutdown_) {
       std::unique_lock<std::mutex> publish_lock(publish_mutex_);
       publish_cv_.wait(publish_lock, [this] {
         return map_has_data_ || shutdown_ || !rclcpp::ok();
       });
-      if (shutdown_ || !rclcpp::ok()) {
+      if (!rclcpp::ok() || shutdown_) {
         break;
       }
+
       if (!map_has_data_) {
         continue;
       }
+
       map_has_data_ = false;
       auto latest_odom = latest_odom_;
       nav_msgs::msg::Path path_out = odom_path_;
       publish_lock.unlock();
 
-      // Publish latest pose consumed
       if (!latest_odom) {
         continue;
       }
@@ -469,19 +478,19 @@ private:
           static_cast<float>(latest_odom->pose.pose.position.z));
       if (publish_occupancy_cloud_ && occupancy_cloud_pub_) {
         std::lock_guard<std::mutex> grid_lock(grid_mutex_);
-        publishOccupancyCloudLocked(latest_pos);
+        publishOccupancyCloud(latest_pos);
       }
     }
   }
 
-  void publishOccupancyCloudLocked(const Eigen::Vector3f &latest_pos) {
+  void publishOccupancyCloud(const Eigen::Vector3f &latest_pos) {
     if (!occupancy_cloud_pub_) {
       return;
     }
+
     const int nv = grid_->config_.voxel_num;
     const int step = occupancy_viz_subsample_;
     const float ray_r = grid_->getMaxRaycastRange();
-
     const size_t reserve_hint =
         occupancy_viz_max_points_ > 0
             ? static_cast<size_t>(std::min(occupancy_viz_max_points_, nv))
