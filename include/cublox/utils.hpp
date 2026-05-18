@@ -23,7 +23,7 @@ namespace cublox {
 inline int posToGlobalIndex(const float pos, const float resolution_inv,
                             const bool origin_at_center) {
   if (origin_at_center) {
-    const float s = static_cast<float>((pos > 0.0f) - (pos < 0.0f));
+    const float s = pos < 0.0f ? -1.0f : 1.0f;
     return static_cast<int>(pos * resolution_inv + s * 0.5f);
   }
   return static_cast<int>(std::floor(pos * resolution_inv));

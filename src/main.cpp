@@ -23,6 +23,7 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -56,14 +57,24 @@ std::string resolveConfigPath(const std::string &maybe_empty) {
   return p.string();
 }
 
+// Approximate fraction 1/step of occupied cells (~uniform in hash space).
+inline bool occupancyVizDropBySubsample(const int hid, const int step) {
+  if (step <= 1) {
+    return false;
+  }
+  const std::uint32_t u = static_cast<std::uint32_t>(hid);
+  const std::uint32_t s = static_cast<std::uint32_t>(step);
+  return ((u * UINT32_C(2654435769)) % s) != 0u;
+}
+
 struct CubloxConfig {
   Eigen::Isometry3f T_base_to_lidar{Eigen::Isometry3f::Identity()};
   std::string map_frame{"odom"};
   std::string pointcloud_topic{"/points"};
   std::string odom_topic{"/odom"};
   bool publish_occupancy_cloud{true};
-  int occupancy_viz_subsample{1};
-  int occupancy_viz_max_points{100000};
+  int viz_subsample{1};
+  int viz_max_points{100000};
   Eigen::Vector3i half_map_size{32, 32, 8};
   float resolution{0.05f};
   bool origin_at_center{false};
@@ -131,16 +142,16 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
   if (root["publish_occupancy_cloud"]) {
     cfg.publish_occupancy_cloud = root["publish_occupancy_cloud"].as<bool>();
   }
-  if (root["occupancy_viz_subsample"]) {
-    cfg.occupancy_viz_subsample = root["occupancy_viz_subsample"].as<int>();
-    if (cfg.occupancy_viz_subsample < 1) {
-      throw std::runtime_error("occupancy_viz_subsample must be >= 1");
+  if (root["viz_subsample"]) {
+    cfg.viz_subsample = root["viz_subsample"].as<int>();
+    if (cfg.viz_subsample < 1) {
+      throw std::runtime_error("viz_subsample must be >= 1");
     }
   }
-  if (root["occupancy_viz_max_points"]) {
-    cfg.occupancy_viz_max_points = root["occupancy_viz_max_points"].as<int>();
-    if (cfg.occupancy_viz_max_points < 0) {
-      throw std::runtime_error("occupancy_viz_max_points must be >= 0");
+  if (root["viz_max_points"]) {
+    cfg.viz_max_points = root["viz_max_points"].as<int>();
+    if (cfg.viz_max_points < 0) {
+      throw std::runtime_error("viz_max_points must be >= 0");
     }
   }
 
@@ -264,8 +275,8 @@ public:
     T_base_to_lidar_ = cublox_cfg.T_base_to_lidar;
 
     publish_occupancy_cloud_ = cublox_cfg.publish_occupancy_cloud;
-    occupancy_viz_subsample_ = cublox_cfg.occupancy_viz_subsample;
-    occupancy_viz_max_points_ = cublox_cfg.occupancy_viz_max_points;
+    viz_subsample_ = cublox_cfg.viz_subsample;
+    viz_max_points_ = cublox_cfg.viz_max_points;
 
     grid_ = std::make_unique<cublox::OccupancyGrid>(
         cublox_cfg.half_map_size, cublox_cfg.resolution,
@@ -345,8 +356,9 @@ public:
     T_odom_to_base.linear() = q.toRotationMatrix();
     const Eigen::Isometry3f T_odom_to_lidar = T_odom_to_base * T_base_to_lidar_;
 
-    if (!buildCloudInOdomFrame(*cloud, T_odom_to_lidar,
-                               grid_->getMaxRaycastRange(), pts)) {
+    if (!buildCloudInOdomFrame(
+            *cloud, T_odom_to_lidar,
+            grid_->getMaxRaycastRange() * grid_->getMaxRaycastRange(), pts)) {
       return;
     }
 
@@ -399,7 +411,8 @@ private:
 
   bool buildCloudInOdomFrame(const sensor_msgs::msg::PointCloud2 &cloud,
                              const Eigen::Isometry3f &T_odom_to_lidar,
-                             const float max_range, cublox::PointCloud &out) {
+                             const float max_range_squared,
+                             cublox::PointCloud &out) {
     if (cloud.fields.empty()) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
                            "PointCloud2 has no fields.");
@@ -419,19 +432,19 @@ private:
 
     Eigen::Index row = 0;
     for (size_t i = 0; i < n; ++i, ++ix, ++iy, ++iz) {
-      const float x = *ix;
-      const float y = *iy;
-      const float z = *iz;
-      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+      const float lx = *ix;
+      const float ly = *iy;
+      const float lz = *iz;
+      if (!std::isfinite(lx) || !std::isfinite(ly) || !std::isfinite(lz)) {
         continue;
       }
 
-      if (std::abs(x) > max_range || std::abs(y) > max_range ||
-          std::abs(z) > max_range) {
+      const Eigen::Vector3f p_lidar(lx, ly, lz);
+      if (p_lidar.squaredNorm() > max_range_squared) {
         continue;
       }
 
-      const Eigen::Vector3f p_odom = T_odom_to_lidar * Eigen::Vector3f(x, y, z);
+      const Eigen::Vector3f p_odom = T_odom_to_lidar * p_lidar;
       out.row(row++) = p_odom.transpose();
     }
 
@@ -489,12 +502,11 @@ private:
     }
 
     const int nv = grid_->config_.voxel_num;
-    const int step = occupancy_viz_subsample_;
+    const int step = viz_subsample_;
     const float ray_r = grid_->getMaxRaycastRange();
     const size_t reserve_hint =
-        occupancy_viz_max_points_ > 0
-            ? static_cast<size_t>(std::min(occupancy_viz_max_points_, nv))
-            : std::min(static_cast<size_t>(nv), size_t(500000));
+        viz_max_points_ > 0 ? static_cast<size_t>(std::min(viz_max_points_, nv))
+                            : std::min(static_cast<size_t>(nv), size_t(500000));
     std::vector<float> interleaved;
     interleaved.reserve(std::max(size_t(4096), reserve_hint) * 4);
 
@@ -502,14 +514,10 @@ private:
       if (!grid_->isOccupied(hid)) {
         continue;
       }
-      if (step > 1) {
-        Eigen::Vector3i id_l;
-        cublox::hashIdToLocalIndex(hid, grid_->config_.map_size_i,
-                                   grid_->config_.half_map_size_i, id_l);
-        const Eigen::Vector3i cell = id_l + grid_->config_.half_map_size_i;
-        if ((cell.x() % step) || (cell.y() % step) || (cell.z() % step)) {
-          continue;
-        }
+
+      // Thinning: approximate 1/step of occupied voxels
+      if (occupancyVizDropBySubsample(hid, step)) {
+        continue;
       }
 
       Eigen::Vector3f pos;
@@ -523,9 +531,8 @@ private:
       interleaved.push_back(pos.y());
       interleaved.push_back(pos.z());
       interleaved.push_back(packRGBFloat(col));
-      if (occupancy_viz_max_points_ > 0 &&
-          static_cast<int>(interleaved.size() / 4) >=
-              occupancy_viz_max_points_) {
+      if (viz_max_points_ > 0 &&
+          static_cast<int>(interleaved.size() / 4) >= viz_max_points_) {
         break;
       }
     }
@@ -579,8 +586,8 @@ private:
   std::thread publish_thread_;
 
   bool publish_occupancy_cloud_{true};
-  int occupancy_viz_subsample_{1};
-  int occupancy_viz_max_points_{0};
+  int viz_subsample_{1};
+  int viz_max_points_{0};
 
   // ROS Subscribers
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;

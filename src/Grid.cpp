@@ -84,7 +84,6 @@ Grid::Grid(const Eigen::Vector3i &half_map_size_i, const float resolution,
                              "). Pick a smaller half_map_size_i.");
   }
   config_.voxel_num = static_cast<int>(total);
-  config_.origin_at_center = origin_at_center;
   std::cout << "cublox::Grid initialized with " << config_.voxel_num
             << " voxels." << std::endl;
 }

@@ -59,21 +59,34 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
   const float ux = dx * invL, uy = dy * invL, uz = dz * invL;
 
   // ---- 3. Amanatides–Woo init in registers ----
-  int ix = (int)floorf(ox * c_cfg.inv_resolution);
-  int iy = (int)floorf(oy * c_cfg.inv_resolution);
-  int iz = (int)floorf(oz * c_cfg.inv_resolution);
-  const int ex_i = (int)floorf(ex * c_cfg.inv_resolution);
-  const int ey_i = (int)floorf(ey * c_cfg.inv_resolution);
-  const int ez_i = (int)floorf(ez * c_cfg.inv_resolution);
+  const bool origin_ctr = c_cfg.origin_at_center;
+  int ix = posToGlobalIndex(ox, c_cfg.inv_resolution, origin_ctr);
+  int iy = posToGlobalIndex(oy, c_cfg.inv_resolution, origin_ctr);
+  int iz = posToGlobalIndex(oz, c_cfg.inv_resolution, origin_ctr);
+  const int ex_i = posToGlobalIndex(ex, c_cfg.inv_resolution, origin_ctr);
+  const int ey_i = posToGlobalIndex(ey, c_cfg.inv_resolution, origin_ctr);
+  const int ez_i = posToGlobalIndex(ez, c_cfg.inv_resolution, origin_ctr);
   const int sx = (ux > 0) - (ux < 0);
   const int sy = (uy > 0) - (uy < 0);
   const int sz = (uz > 0) - (uz < 0);
   const float tDx = (sx == 0) ? CUDART_INF_F : fabsf(c_cfg.resolution / ux);
   const float tDy = (sy == 0) ? CUDART_INF_F : fabsf(c_cfg.resolution / uy);
   const float tDz = (sz == 0) ? CUDART_INF_F : fabsf(c_cfg.resolution / uz);
-  const float bx = (ix + (sx > 0)) * c_cfg.resolution;
-  const float by = (iy + (sy > 0)) * c_cfg.resolution;
-  const float bz = (iz + (sz > 0)) * c_cfg.resolution;
+  // Corner grids: voxel i spans [i, i+1) in voxel coordinates (faces at k*r).
+  // Center grids: voxel i spans [-0.5, +0.5) relative to cell center i*r,
+  // so faces lie at planes (k + sx*0.5)*r stepped by full resolution.
+  const float bx =
+      origin_ctr
+          ? (((float)ix + 0.5f * (float)sx) * c_cfg.resolution)
+          : (((float)ix + (float)(sx > 0)) * c_cfg.resolution);
+  const float by =
+      origin_ctr
+          ? (((float)iy + 0.5f * (float)sy) * c_cfg.resolution)
+          : (((float)iy + (float)(sy > 0)) * c_cfg.resolution);
+  const float bz =
+      origin_ctr
+          ? (((float)iz + 0.5f * (float)sz) * c_cfg.resolution)
+          : (((float)iz + (float)(sz > 0)) * c_cfg.resolution);
   float tMx = (sx == 0) ? CUDART_INF_F : (bx - ox) / ux;
   float tMy = (sy == 0) ? CUDART_INF_F : (by - oy) / uy;
   float tMz = (sz == 0) ? CUDART_INF_F : (bz - oz) / uz;
@@ -130,8 +143,7 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
 //
 // One thread per voxel. Untouched voxels (op_cnt == 0) early-out.
 //
-// Hit dominates: endpoint hits apply l_hit * hit_count; else miss applies
-// l_miss * op_count.
+// Log-odds: l_miss counts pure traversals (op - hit); l_hit counts endpoints.
 //
 // After updating, counters zero for the next raycast pass.
 // ─────────────────────────────────────────────────
@@ -153,20 +165,16 @@ __global__ void applyUpdateKernel(
   }
 
   const int hit = hit_cnt[h];
+  const int miss_ops = op > hit ? op - hit : 0;
   const float stored0 = occ[h];
   float logit = stored0 + l_unknown;
-  if (hit > 0) {
-    logit += l_hit * static_cast<float>(hit);
-    if (logit > l_max) {
-      logit = l_max;
-    }
-  } else {
-    // op > 0 and hit == 0 → all `op` operations on this voxel were
-    // free-space crossings (misses).
-    logit += l_miss * static_cast<float>(op);
-    if (logit < l_min) {
-      logit = l_min;
-    }
+  logit += l_miss * static_cast<float>(miss_ops);
+  logit += l_hit * static_cast<float>(hit);
+  if (logit < l_min) {
+    logit = l_min;
+  }
+  if (logit > l_max) {
+    logit = l_max;
   }
 
   const float stored = logit - l_unknown;

@@ -304,7 +304,9 @@ void OccupancyGrid::update(const PointCloud &cloud,
       Eigen::Vector3i origin_i;
       posToGlobalIndex(sensor_origin, config_.resolution_inv,
                        config_.origin_at_center, origin_i);
-      updateOriginAndBound(sensor_origin, origin_i);
+      const Eigen::Vector3f origin_f =
+          origin_i.cast<float>() * config_.resolution;
+      updateOriginAndBound(origin_f, origin_i);
     }
     first_run_ = false;
   }
@@ -336,6 +338,7 @@ void OccupancyGrid::update(const PointCloud &cloud,
   cfg.inv_resolution = config_.resolution_inv;
   cfg.max_range = max_raycast_range_;
   cfg.map_vox_num = config_.voxel_num;
+  cfg.origin_at_center = config_.origin_at_center;
 
   // Pass 1: walk every ray, atomic-increment op_cnt per voxel and
   // hit_cnt at endpoints.

@@ -26,15 +26,18 @@
 namespace cublox {
 
 // Per-frame configuration uploaded into __constant__ memory before each
-// raycast launch. Total size is 52 bytes on the GPU.
+// raycast launch. Plain aggregate (no defaulted members) — required for
+// `__constant__` storage in CUDA. 53 bytes on the GPU.
 struct RayCastCfg {
-  float3 origin;        // sensor position (world frame) - 12 bytes
-  int3 map_size_i;      // voxels per axis on the local map - 12 bytes
-  int3 half_map_size_i; // (map_size_i - 1) / 2 - 12 bytes
-  float resolution;     // 4 bytes
-  float inv_resolution; // 4 bytes
-  float max_range;      // rays longer than this are clipped - 4 bytes
-  int map_vox_num; // == map_size_i.x * map_size_i.y * map_size_i.z - 4 bytes
+  float3 origin;         // sensor position (world frame) - 12 bytes
+  int3 map_size_i;       // voxels per axis on the local map - 12 bytes
+  int3 half_map_size_i;  // (map_size_i - 1) / 2 conceptually — see Grid - 12
+                         // bytes
+  float resolution;      // 4 bytes
+  float inv_resolution;  // 4 bytes
+  float max_range;       // rays longer than this are clipped - 4 bytes
+  int map_vox_num;       // map_size_i.x * map_size_i.y * map_size_i.z - 4 bytes
+  bool origin_at_center; // corner binning vs centered bins — see Grid - 1 byte
 };
 
 // Host-side launcher for rayCastUpdateKernel
@@ -52,10 +55,10 @@ void launchRayCastUpdate(const RayCastCfg &cfg, const float *d_cloud_x,
 
 // Host-side launcher for applyUpdateKernel
 //
-// One CUDA thread per voxel: reads (op_cnt, hit_cnt), folds them into
-// the log-odds buffer (hit dominates when both are non-zero, clamps to
-// [l_min, l_max], then zeros both counters so the next raycast pass
-// starts from a clean slate. Voxels with op_cnt == 0 early-exit.
+// One CUDA thread per voxel: reads (op_cnt, hit_cnt), folds them into the
+// log-odds buffer as l_miss * (op - hit) + l_hit * hit, clamps true logit to
+// [l_min, l_max], then zeros both counters for the next raycast pass. Voxels
+// with op_cnt == 0 early-exit.
 //
 // d_occ: zero-centered log-odds: stored = logit - l_unknown (unknown prior ==
 // 0). Pass the same l_unknown used on host for queries so hits/misses update

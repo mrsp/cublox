@@ -6,8 +6,8 @@ pointcloud_topic: /pandar_points
 odom_topic: /applanix/lvx_client/odom
 
 # Half-extent in voxels on each axis from the sliding window origin (see Grid docs).
-# A config of [250, 250, 75] corresponds to a 500 x 500 x 150 voxel map and will allocate
-# ~750MBs on the GPU to use efficiently and a 4.5KBs of pinned RAM.
+# Example [250, 250, 75] ⇒ map_size_i 501 × 501 × 151 (~37.9M cells); voxel GPU buffers alone
+# ≈723 MiB (plus CUDA overhead) on typical builds; pinned host slab staging ≈4.6 KiB.
 half_map_size:
   - 250
   - 250
@@ -38,5 +38,5 @@ probabilities:
   occupied: 0.85
   
 publish_occupancy_cloud: true
-viz_subsample: 50
-viz_max_points: 500000
+viz_subsample: 2
+viz_max_points: 1000000

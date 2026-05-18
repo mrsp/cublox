@@ -40,8 +40,9 @@ __host__ __device__ inline float3 operator*(float3 a, float s) {
   return make_float3(a.x * s, a.y * s, a.z * s);
 }
 
+// Non-zero for all finite x (tie-break at 0 gives +1, matching voxel rounding).
 __host__ __device__ inline float signf(float x) {
-  return static_cast<float>((x > 0.0f) - (x < 0.0f));
+  return x < 0.0f ? -1.0f : 1.0f;
 }
 
 __host__ __device__ inline float3 to_float3(int3 a) {
