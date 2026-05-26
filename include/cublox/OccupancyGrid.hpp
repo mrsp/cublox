@@ -15,9 +15,11 @@
 
 #include <Eigen/Dense>
 #include <cuda_runtime.h>
+#include <optional>
 #include <vector>
 
 #include <cublox/Grid.hpp>
+#include <cublox/kernels.hpp>
 
 namespace cublox {
 
@@ -31,6 +33,11 @@ public:
     OCCUPIED = 2,
   };
 
+  struct OccupancySample {
+    Eigen::Vector3f position;
+    VoxelState state;
+  };
+
   OccupancyGrid(const Eigen::Vector3i &half_map_size_i, const float resolution,
                 const bool origin_at_center,
                 const std::optional<double> recenter_threshold,
@@ -40,14 +47,21 @@ public:
 
   void reset() override;
   void resetVoxel(const int hash_id) override;
-  void resetVoxels(const std::vector<int> &hash_ids) override;
-  void clearRecenterExitSlabs(const std::vector<int> &x_slices,
-                              const std::vector<int> &y_slices,
-                              const std::vector<int> &z_slices) override;
 
   // Run one raycast pass for `input_cloud` originating at `sensor_origin`.
   void update(const PointCloud &input_cloud,
               const Eigen::Vector3f &sensor_origin);
+
+  // Sliding-window recenter entirely on GPU (slab plan + clear).
+  void recenter(const Eigen::Vector3f &pos);
+
+  // Pull voxels within `radius` [m] of `center` (sphere) from GPU memory only.
+  // `state_filter`: std::nullopt returns all states; otherwise only matching
+  // voxels. `max_results`: cap output count (0 = no cap beyond fetch buffer).
+  std::vector<OccupancySample> fetchOccupancyAround(
+      const Eigen::Vector3f &center, const float radius,
+      const std::optional<VoxelState> state_filter = std::nullopt,
+      const int max_results = 0) const;
 
   // Default: 25m. Call this once during setup.
   inline void setMaxRaycastRange(const float range) {
@@ -68,6 +82,9 @@ public:
     l_occupied_ = l_occupied;
     l_unknown_ = 0.5f * (l_free + l_occupied);
   }
+
+  inline float getResolutionInv() const { return config_.resolution_inv; }
+  inline bool getOriginAtCenter() const { return config_.origin_at_center; }
 
   bool isOccupied(const Eigen::Vector3f &pos) const;
   bool isUnknown(const Eigen::Vector3f &pos) const;
@@ -96,44 +113,30 @@ private:
     return l >= l_free_ && l < l_occupied_;
   }
 
+  float storedAt(const int hash_id) const;
+
   // Grow d_cloud_{x,y,z}_ to hold at least `n` points. Cheap no-op when
   // capacity already suffices.
   void ensureCloudCapacity(const int n);
 
-  // Host + device voxel buffers; called from the sized constructor when
+  // Device voxel buffers; called from the sized constructor when
   // config_.voxel_num > 0. Rolls back partial CUDA allocations on failure.
   void allocateVoxelBuffers();
 
-  // Host-side mirror of d_occ_. Updated incrementally from GPU modified lists
-  // inside update() instead of copying the entire volume each frame.
-  std::vector<float> occupancy_buffer_;
-
-  // Device + host staging for voxels whose log-odds change in
-  // applyUpdateKernel. Capacity equals voxel_num (at most one list entry per
-  // voxel per frame).
-  unsigned int *d_modified_count_{nullptr};
-  int *d_modified_idx_{nullptr};
-  float *d_modified_val_{nullptr};
-  std::vector<int> h_modified_idx_;
-  std::vector<float> h_modified_val_;
+  // Grow fetch output buffers to hold at least `n` entries.
+  void ensureFetchCapacity(const int n) const;
 
   // Per-voxel atomics buffers, allocated in the sized constructor.
   // Sized to config_.voxel_num once in allocateVoxelBuffers.
   int *d_op_cnt_{nullptr};
   int *d_hit_cnt_{nullptr};
 
-  // Persistent device-side buffer: same encoding as occupancy_buffer_
-  // (zero-centered logit; unknown prior == 0). applyUpdateKernel reads/writes
-  // each frame.
+  // Persistent device-side buffer: zero-centered logit; unknown prior == 0.
   float *d_occ_{nullptr};
 
-  // Recenter: one stream + small slice-ID buffer per axis so x/y/z slab
-  // kernels can run concurrently (overlapping execution after H2D).
-  cudaStream_t recenter_stream_[3]{nullptr, nullptr, nullptr};
+  // Device buffers for recenter slab planning (one list per axis).
   int *d_recenter_slices_[3]{nullptr, nullptr, nullptr};
-  // Page-locked host staging for slice IDs (true async cudaMemcpyAsync H2D).
-  // Uses pinned host memory.
-  int *h_recenter_slices_pin_[3]{nullptr, nullptr, nullptr};
+  RecenterResult *d_recenter_result_{nullptr};
 
   // SoA device-side mirror of the input cloud. Reused across frames;
   // grown by ensureCloudCapacity on demand.
@@ -141,6 +144,12 @@ private:
   float *d_cloud_y_{nullptr};
   float *d_cloud_z_{nullptr};
   int cloud_capacity_{0};
+
+  // Device buffers for fetchOccupancyAround (reused; grown on demand).
+  mutable unsigned int *d_fetch_count_{nullptr};
+  mutable float3 *d_fetch_pos_{nullptr};
+  mutable unsigned char *d_fetch_state_{nullptr};
+  mutable int fetch_capacity_{0};
 
   // Rays longer than this are clipped to this length before being cast.
   // Lives here (not in Grid::Config) because clipping is a raycaster

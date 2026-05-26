@@ -1,7 +1,10 @@
 # Pass this file via ROS param: config_file: <path>
 #
 # Frame used for published clouds and odometry (typically "odom").
+# RViz picks this up automatically via: ros2 launch cublox cublox.launch.py
 map_frame: odom
+# TF child frame for the vehicle; RViz Third Person Follower tracks this frame.
+tracking_frame: base_link
 pointcloud_topic: /pandar_points
 odom_topic: /applanix/lvx_client/odom
 
@@ -39,4 +42,4 @@ probabilities:
   
 publish_occupancy_cloud: true
 viz_subsample: 2
-viz_max_points: 1000000
+viz_max_points: 500000

@@ -19,8 +19,15 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>tf2_ros</depend>
   <depend>eigen</depend>
   <depend>yaml-cpp</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>rviz2</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
   <!-- CUDA toolkit. Rosdep on Ubuntu maps "cuda" to nvidia-cuda-toolkit;
        we deliberately don't list it as <depend> because most users install

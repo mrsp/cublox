@@ -15,7 +15,6 @@
 
 #include <Eigen/Dense>
 #include <optional>
-#include <vector>
 
 namespace cublox {
 
@@ -23,29 +22,25 @@ class Grid {
 public:
   Grid(const Eigen::Vector3i &half_map_size_i, const float resolution,
        const std::optional<float> recenter_threshold = std::nullopt,
-       const bool origin_at_center = true);
+       const bool origin_at_center = false);
   Grid() = default;
   ~Grid() = default;
 
   bool inside(const Eigen::Vector3f &pos) const;
   bool inside(const Eigen::Vector3i &id_g) const;
-  void clearVoxelsOutOfGrid(const std::vector<int> &clear_id, const int &i);
-  void updateOriginAndBound(const Eigen::Vector3f &new_origin_f,
-                            const Eigen::Vector3i &new_origin_i);
-  void recenter(const Eigen::Vector3f &pos);
+  void updateOriginAndBound(const Eigen::Vector3i &new_origin_i);
 
   virtual void reset() = 0;
   virtual void resetVoxel(const int hash_id) = 0;
-  virtual void resetVoxels(const std::vector<int> &hash_ids);
-  // After a sliding-window recenter: zero voxels on exiting slabs. Default
-  // expands slabs to hash IDs on the CPU; OccupancyGrid overrides with a GPU
-  // mask sweep (check clearRecenterExitSlabs there).
-  virtual void clearRecenterExitSlabs(const std::vector<int> &x_slices,
-                                      const std::vector<int> &y_slices,
-                                      const std::vector<int> &z_slices);
 
   Eigen::Vector3i getOriginIndex() const { return origin_i_; }
   Eigen::Vector3f getOriginPosition() const { return origin_f_; }
+
+  // Largest sphere radius [m] centered at `center` that fits in the window.
+  float maxInWindowRadius(const Eigen::Vector3f &center) const;
+  // Horizontal (xy) margin only — for lidar range/fetch; z half_map is often
+  // much smaller and must not cap horizontal raycast to ~7 m.
+  float maxHorizontalInWindowRadius(const Eigen::Vector3f &center) const;
 
   struct Config {
     float resolution{0.0};
