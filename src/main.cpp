@@ -81,6 +81,7 @@ struct CubloxConfig {
   std::string tracking_frame{"base_link"};
   std::string pointcloud_topic{"/points"};
   std::string odom_topic{"/odom"};
+  bool publish_tf{false};
   bool publish_occupancy_cloud{true};
   int viz_subsample{1};
   int viz_max_points{100000};
@@ -153,6 +154,9 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
 
   if (root["publish_occupancy_cloud"]) {
     cfg.publish_occupancy_cloud = root["publish_occupancy_cloud"].as<bool>();
+  }
+  if (root["publish_tf"]) {
+    cfg.publish_tf = root["publish_tf"].as<bool>();
   }
   if (root["viz_subsample"]) {
     cfg.viz_subsample = root["viz_subsample"].as<int>();
@@ -289,7 +293,6 @@ public:
     pointcloud_topic_ = cublox_cfg.pointcloud_topic;
     odom_topic_ = cublox_cfg.odom_topic;
     T_base_to_lidar_ = cublox_cfg.T_base_to_lidar;
-
     publish_occupancy_cloud_ = cublox_cfg.publish_occupancy_cloud;
     viz_subsample_ = cublox_cfg.viz_subsample;
     viz_max_points_ = cublox_cfg.viz_max_points;
@@ -341,7 +344,9 @@ public:
 
     odom_path_.header.frame_id = map_frame_;
 
-    tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    if (cublox_cfg.publish_tf) {
+      tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+    }
 
     timer_ = this->create_wall_timer(std::chrono::milliseconds(1000),
                                      std::bind(&CubloxDriver::run, this));
@@ -408,6 +413,7 @@ public:
     }
 
     const Eigen::Vector3f robot_pos = T_odom_to_base.translation();
+    const Eigen::Vector3f sensor_origin = T_odom_to_lidar.translation();
     const rclcpp::Time cloud_stamp(cloud->header.stamp);
     const bool new_cloud = !last_mapped_cloud_stamp_valid_ ||
                            cloud_stamp != last_mapped_cloud_stamp_;
@@ -420,7 +426,7 @@ public:
       }
       const auto t0 = std::chrono::steady_clock::now();
       if (new_cloud) {
-        grid_->update(pts, robot_pos);
+        grid_->update(pts, sensor_origin);
         last_mapped_cloud_stamp_ = cloud_stamp;
         last_mapped_cloud_stamp_valid_ = true;
       }
@@ -560,6 +566,9 @@ private:
   }
 
   void publishTrackingTf(const nav_msgs::msg::Odometry &odom) {
+    if (!tf_broadcaster_) {
+      return;
+    }
     geometry_msgs::msg::TransformStamped tf;
     tf.header.stamp = odom.header.stamp;
     tf.header.frame_id = map_frame_;

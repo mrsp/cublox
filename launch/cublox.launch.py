@@ -16,6 +16,11 @@ def _load_cublox_yaml(config_path: str) -> dict:
         return yaml.safe_load(handle) or {}
 
 
+def _safe_filename_token(value: str) -> str:
+    """Frame ids may contain '/' (e.g. ground_truth/p0); keep temp paths flat."""
+    return value.replace("/", "_").replace("\\", "_")
+
+
 def _materialize_rviz_config(
     pkg_share: str, map_frame: str, tracking_frame: str
 ) -> str:
@@ -25,10 +30,11 @@ def _materialize_rviz_config(
     content = content.replace("@MAP_FRAME@", map_frame)
     content = content.replace("@TRACKING_FRAME@", tracking_frame)
 
-    out_path = os.path.join(
-        tempfile.gettempdir(),
-        f"cublox_{map_frame}_{tracking_frame}.rviz",
+    name = (
+        f"cublox_{_safe_filename_token(map_frame)}_"
+        f"{_safe_filename_token(tracking_frame)}.rviz"
     )
+    out_path = os.path.join(tempfile.gettempdir(), name)
     with open(out_path, "w", encoding="utf-8") as handle:
         handle.write(content)
     return out_path
