@@ -95,6 +95,7 @@ struct CubloxConfig {
   bool origin_at_center{false};
   std::optional<double> recenter_threshold;
   float max_raycast_range{20.0f};
+  float max_viz_radius{20.0f};
   float l_hit{0.847f};       //  logit(0.70)
   float l_miss{-0.405f};     //  logit(0.40)
   float l_min{-1.992f};      //  logit(0.12)
@@ -169,6 +170,11 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
   }
   if (root["max_raycast_range"]) {
     cfg.max_raycast_range = root["max_raycast_range"].as<float>();
+  }
+  if (root["max_viz_radius"]) {
+    cfg.max_viz_radius = root["max_viz_radius"].as<float>();
+  } else {
+    cfg.max_viz_radius = cfg.max_raycast_range;
   }
 
   if (root["publish_input_cloud"]) {
@@ -317,6 +323,7 @@ public:
     publish_occupancy_cloud_ = cublox_cfg.publish_occupancy_cloud;
     viz_subsample_ = cublox_cfg.viz_subsample;
     viz_max_points_ = cublox_cfg.viz_max_points;
+    max_viz_radius_ = cublox_cfg.max_viz_radius;
     if (viz_max_points_ <= 0 || viz_max_points_ > kMaxVizPointsPerFrame) {
       if (viz_max_points_ > kMaxVizPointsPerFrame) {
         RCLCPP_WARN(get_logger(),
@@ -382,7 +389,7 @@ public:
       tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
     }
 
-    timer_ = this->create_wall_timer(std::chrono::milliseconds(1000),
+    timer_ = this->create_wall_timer(std::chrono::milliseconds(100),
                                      std::bind(&CubloxDriver::run, this));
 
     rclcpp::on_shutdown([this]() { requestStop(); });
@@ -478,7 +485,7 @@ public:
 
       if (publish_occupancy_cloud_ && !shutdown_) {
         const float fetch_r =
-            std::min(grid_->getMaxRaycastRange(),
+            std::min(max_viz_radius_,
                      grid_->maxHorizontalInWindowRadius(robot_pos));
         const auto t_fetch0 = std::chrono::steady_clock::now();
         occ_samples = grid_->fetchOccupancyAround(
@@ -742,7 +749,7 @@ private:
     }
 
     const auto t0 = std::chrono::steady_clock::now();
-    const float ray_r = grid_->getMaxRaycastRange();
+    const float ray_r = max_viz_radius_;
     const int step = viz_subsample_;
     const size_t max_pts = static_cast<size_t>(viz_max_points_);
 
@@ -838,6 +845,7 @@ private:
   bool publish_occupancy_cloud_{true};
   int viz_subsample_{1};
   int viz_max_points_{0};
+  float max_viz_radius_{20.0f};
 
   // ROS Subscribers
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;

@@ -61,9 +61,9 @@ void launchRayCastUpdate(const RayCastCfg &cfg, const float *d_cloud_x,
 // [l_min, l_max], then zeros both counters for the next raycast pass. Voxels
 // with op_cnt == 0 early-exit.
 //
-// d_occ: zero-centered log-odds: stored = logit - l_unknown (unknown prior ==
-// 0). Pass the same l_unknown used on host for queries so hits/misses update
-// true logit then re-encode to stored.
+// d_occ: stored = logit - l_unknown with l_unknown = logit(0.5) (unknown prior
+// stored == 0). Pass the same l_unknown used on host for queries so hits/misses
+// update true logit then re-encode to stored.
 void launchApplyUpdate(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
                        const int voxel_num, const float l_hit,
                        const float l_miss, const float l_min, const float l_max,
@@ -97,8 +97,8 @@ struct RecenterResult {
   int n_slices[3];
 };
 
-// Plans slice IDs on device, clears exiting slabs (or full-resets `d_occ`), and
-// writes the outcome to `h_result`. No CPU-side slice expansion.
+// Plans slice IDs on device, clears exiting and entering slabs (or full-resets
+// `d_occ`), and writes the outcome to `h_result`. No CPU-side slice expansion.
 void launchRecenter(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
                     const RecenterCfg &cfg, int *d_slices_x, int *d_slices_y,
                     int *d_slices_z, RecenterResult *d_result,
@@ -107,8 +107,8 @@ void launchRecenter(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
 // Recenter: reset exiting axis-aligned slabs on GPU.
 // One thread per row; inner loop uses contiguous d_occ indices (++h or h +=
 // nz) for bandwidth.
-void launchClearRecenterSlabsForAxis(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
-                                     const int3 &map_size_i,
+void launchClearRecenterSlabsForAxis(float *d_occ, int *d_op_cnt,
+                                     int *d_hit_cnt, const int3 &map_size_i,
                                      const int3 &half_map_size_i,
                                      const int *d_slice_local_values,
                                      const int n_slices, const int axis,
@@ -116,8 +116,8 @@ void launchClearRecenterSlabsForAxis(float *d_occ, int *d_op_cnt, int *d_hit_cnt
 
 // Per-frame config for fetchOccupancySphereKernel (uploaded to __constant__).
 struct OccupancyFetchCfg {
-  int3 center_g;       // sphere center as global voxel index
-  int3 origin_i;       // sliding-window origin (global voxel index)
+  int3 center_g; // sphere center as global voxel index
+  int3 origin_i; // sliding-window origin (global voxel index)
   int3 map_size_i;
   int3 half_map_size_i;
   int gz_min;          // inclusive global z slab range intersecting sphere
@@ -138,9 +138,8 @@ struct OccupancyFetchCfg {
 // `d_out_count` is zeroed by the caller before launch. Writes at most
 // `output_capacity` entries; `max_results` (0 = unlimited) caps logical count.
 void launchFetchOccupancyAround(const OccupancyFetchCfg &cfg,
-                                const float *d_occ,
-                                unsigned int *d_out_count, float3 *d_out_pos,
-                                unsigned char *d_out_state,
+                                const float *d_occ, unsigned int *d_out_count,
+                                float3 *d_out_pos, unsigned char *d_out_state,
                                 const unsigned int output_capacity,
                                 const unsigned int max_results,
                                 const cudaStream_t stream);

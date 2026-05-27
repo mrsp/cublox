@@ -52,7 +52,9 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
     return;
   }
 
-  if (L > c_cfg.max_range) {
+  // Clipped rays mark free space only; the clip point is not a sensor hit.
+  const bool clipped = (L > c_cfg.max_range);
+  if (clipped) {
     const float s = c_cfg.max_range / L;
     ex = ox + dx * s;
     ey = oy + dy * s;
@@ -133,17 +135,17 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
     }
   }
 
-  // ---- 6. endpoint: count as both an op (visited) and a hit ----
-  // The op_cnt increment is what makes applyUpdateKernel pick this
-  // voxel up; its `op == 0` early-out would otherwise skip endpoints
-  // that received hit_cnt only and the hit would be silently dropped.
+  // ---- 6. endpoint ----
+  // Real measurements: op + hit. Range-clipped rays: op only (miss / free).
   const int3 end_g = make_int3(ex_i, ey_i, ez_i);
   if (insideSlidingWindow(end_g, c_cfg.origin_i, c_cfg.half_map_size_i)) {
     const int h = globalIndexToHashId(end_g, c_cfg.map_size_i,
                                       c_cfg.half_map_size_i);
     if (h >= 0 && h < c_cfg.map_vox_num) {
       atomicAdd(&op_cnt[h], 1);
-      atomicAdd(&hit_cnt[h], 1);
+      if (!clipped) {
+        atomicAdd(&hit_cnt[h], 1);
+      }
     }
   }
 }
@@ -151,8 +153,9 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
 // ─────────────────────────────────────────────────
 // applyUpdateKernel
 //
-// Buffer stores zero-centered logits: occ[h] == logit - l_unknown (unknown ==
-// 0). Decode before hit/miss, clamp true logit to [l_min, l_max], re-encode.
+// Buffer stores logits relative to l_unknown (logit(0.5) == 0): occ[h] unknown
+// when occ[h] == 0. Decode before hit/miss, clamp true logit to [l_min, l_max],
+// re-encode.
 //
 // One thread per voxel. Untouched voxels (op_cnt == 0) early-out.
 //
@@ -292,7 +295,7 @@ void launchClearVoxelsByIndex(float *d_occ, const int *d_indices, const int n,
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Recenter — plan exiting slabs on device, then clear on device.
+// Recenter — plan exiting + entering slabs on device, then clear on device.
 // ─────────────────────────────────────────────────────────────────────
 __constant__ RecenterCfg c_recenter_cfg;
 
@@ -369,14 +372,27 @@ __global__ void planRecenterKernel(int *__restrict__ d_slices_x,
                      : (axis == 1 ? result->n_slices[1] : result->n_slices[2]);
 
     if (shift_a > 0) {
+      // Exiting low-side slabs (fall off as origin moves forward).
       for (int k = 0; k < shift_a; ++k) {
         out_slices[n_out++] =
             normalizeLocalSlice(min_id_l + k, -half_a, half_a);
       }
+      // Entering high-side slabs: new world coords, clear stale hash data.
+      for (int k = 0; k < shift_a; ++k) {
+        out_slices[n_out++] =
+            normalizeLocalSlice(half_a - k, -half_a, half_a);
+      }
     } else {
+      const int n_enter = -shift_a;
+      // Exiting high-side slabs.
       for (int k = -1; k >= shift_a; --k) {
         out_slices[n_out++] =
             normalizeLocalSlice(min_id_l + k, -half_a, half_a);
+      }
+      // Entering low-side slabs.
+      for (int k = 0; k < n_enter; ++k) {
+        out_slices[n_out++] =
+            normalizeLocalSlice(-half_a + k, -half_a, half_a);
       }
     }
   }

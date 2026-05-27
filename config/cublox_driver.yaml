@@ -2,37 +2,36 @@
 #
 # Frame used for published clouds and odometry (typically "odom").
 # RViz picks this up automatically via: ros2 launch cublox cublox.launch.py
-map_frame: gt_map
+map_frame: odom
 # TF child frame for the vehicle; RViz Third Person Follower tracks this frame.
 tracking_frame: base_link
-pointcloud_topic: null
-depth_topic: /d400/depth/image_raw
-K: [422.1437072753906, 0.0, 427.0083312988281, 0.0, 422.1437072753906, 245.2209014892578, 0.0, 0.0, 1.0]
-odom_topic: /gt
+pointcloud_topic: /pandar_points
+odom_topic: /applanix/lvx_client/odom
 
 # Half-extent in voxels on each axis from the sliding window origin (see Grid docs).
 # Example [250, 250, 75] ⇒ map_size_i 501 × 501 × 151 (~37.9M cells); voxel GPU buffers alone
 # ≈723 MiB (plus CUDA overhead) on typical builds; pinned host slab staging ≈4.6 KiB.
 half_map_size:
-  - 500
-  - 500
-  - 100
+  - 350
+  - 350
+  - 75
 
-resolution: 0.02 # meters
+resolution: 0.1 # meters
 origin_at_center: false # false: origin is at the bottom-left corner of the map
 
 # Set to null or omit to disable recenter threshold behavior.
 recenter_threshold: 4.0 # meters
-max_raycast_range: 3.0 # meters
+max_raycast_range: 25.0 # meters
+max_viz_radius: 25.0 # meters — occupancy cloud fetch / color scale
 
-# Static transform from base frame to sensor frame
+# Static transform from base frame to lidar frame
 base_to_sensor:
-  translation: [0.22722047136786871, -0.06601512576001335, 0.9157872415132173]
+  translation: [0.98837, -0.06666, -1.37611]
   rotation:
-    x: -0.49538006860636935
-    y: 0.4995473514230949
-    z: -0.49840674562280746
-    w: 0.5065982108450462
+    x: 0.0
+    y: 0.0
+    z: 0.99987200
+    w: 0.01599934
 
 probabilities:
   hit: 0.9
@@ -43,7 +42,6 @@ probabilities:
   occupied: 0.85
   
 publish_occupancy_cloud: true
-publish_input_cloud: true
 publish_tf: true
 viz_subsample: 1
 viz_max_points: 1000000

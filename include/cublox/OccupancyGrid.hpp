@@ -80,7 +80,8 @@ public:
     l_max_ = l_max;
     l_free_ = l_free;
     l_occupied_ = l_occupied;
-    l_unknown_ = 0.5f * (l_free + l_occupied);
+    // stored == 0 decodes to logit(0.5): true 50/50 unknown prior.
+    l_unknown_ = 0.0f;
   }
 
   inline float getResolutionInv() const { return config_.resolution_inv; }
@@ -99,8 +100,8 @@ public:
 private:
   bool first_run_{true};
 
-  // Buffer holds zero-centered logits: stored == logit - l_unknown_. Unknown
-  // prior is stored == 0 (cudaMemset-friendly); decode with + l_unknown_.
+  // Buffer holds logits relative to l_unknown_ (logit(0.5) == 0). Unknown prior
+  // is stored == 0 (cudaMemset-friendly); decode with + l_unknown_.
   float storedToLogit(const float s) const noexcept { return s + l_unknown_; }
   bool occOccupied(const float s) const noexcept {
     return storedToLogit(s) >= l_occupied_;
@@ -164,7 +165,7 @@ private:
   float l_max_{3.476f};       //  logit(0.97)
   float l_free_{-0.0004f};    //  logit(0.499)
   float l_occupied_{1.7346f}; //  logit(0.85)
-  float l_unknown_{0.5f * (l_free_ + l_occupied_)};
+  float l_unknown_{0.0f};
 };
 
 } // namespace cublox
