@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -40,6 +41,7 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
 #include <std_msgs/msg/color_rgba.hpp>
@@ -76,12 +78,15 @@ inline bool occupancyVizDropBySubsample(const Eigen::Vector3f &pos,
 }
 
 struct CubloxConfig {
-  Eigen::Isometry3f T_base_to_lidar{Eigen::Isometry3f::Identity()};
+  Eigen::Isometry3f T_base_to_sensor{Eigen::Isometry3f::Identity()};
   std::string map_frame{"odom"};
   std::string tracking_frame{"base_link"};
-  std::string pointcloud_topic{"/points"};
+  std::optional<std::string> pointcloud_topic;
+  std::optional<std::string> depth_topic;
+  std::optional<Eigen::Matrix<float, 3, 3>> K;
   std::string odom_topic{"/odom"};
   bool publish_tf{false};
+  bool publish_input_cloud{true};
   bool publish_occupancy_cloud{true};
   int viz_subsample{1};
   int viz_max_points{100000};
@@ -108,8 +113,22 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
   if (root["tracking_frame"]) {
     cfg.tracking_frame = root["tracking_frame"].as<std::string>();
   }
-  if (root["pointcloud_topic"]) {
+  if (root["pointcloud_topic"] && !root["pointcloud_topic"].IsNull()) {
     cfg.pointcloud_topic = root["pointcloud_topic"].as<std::string>();
+  }
+  if (root["depth_topic"] && !root["depth_topic"].IsNull()) {
+    cfg.depth_topic = root["depth_topic"].as<std::string>();
+  }
+  if (root["K"]) {
+    const YAML::Node k_node = root["K"];
+    if (!k_node.IsSequence() || k_node.size() != 9) {
+      throw std::runtime_error("K must be a sequence of 9 floats");
+    }
+    Eigen::Matrix<float, 3, 3> K;
+    for (int i = 0; i < 9; ++i) {
+      K(i / 3, i % 3) = k_node[i].as<float>();
+    }
+    cfg.K = K;
   }
   if (root["odom_topic"]) {
     cfg.odom_topic = root["odom_topic"].as<std::string>();
@@ -152,6 +171,9 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
     cfg.max_raycast_range = root["max_raycast_range"].as<float>();
   }
 
+  if (root["publish_input_cloud"]) {
+    cfg.publish_input_cloud = root["publish_input_cloud"].as<bool>();
+  }
   if (root["publish_occupancy_cloud"]) {
     cfg.publish_occupancy_cloud = root["publish_occupancy_cloud"].as<bool>();
   }
@@ -171,19 +193,19 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
     }
   }
 
-  if (!root["base_to_lidar"]) {
-    throw std::runtime_error("YAML missing required key 'base_to_lidar' in " +
+  if (!root["base_to_sensor"]) {
+    throw std::runtime_error("YAML missing required key 'base_to_sensor' in " +
                              path);
   }
-  const YAML::Node tl = root["base_to_lidar"];
+  const YAML::Node tl = root["base_to_sensor"];
   if (!tl["translation"] || !tl["rotation"]) {
     throw std::runtime_error(
-        "base_to_lidar must contain 'translation' and 'rotation' in " + path);
+        "base_to_sensor must contain 'translation' and 'rotation' in " + path);
   }
 
   const YAML::Node tr = tl["translation"];
   if (!tr.IsSequence() || tr.size() != 3) {
-    throw std::runtime_error("base_to_lidar.translation must be [x, y, z]");
+    throw std::runtime_error("base_to_sensor.translation must be [x, y, z]");
   }
   Eigen::Vector3f trans(tr[0].as<float>(), tr[1].as<float>(),
                         tr[2].as<float>());
@@ -208,9 +230,9 @@ CubloxConfig loadConfigFromYaml(const std::string &path) {
   Eigen::Quaternionf q(qw, qx, qy, qz);
   q.normalize();
 
-  cfg.T_base_to_lidar.setIdentity();
-  cfg.T_base_to_lidar.linear() = q.toRotationMatrix();
-  cfg.T_base_to_lidar.translation() = trans;
+  cfg.T_base_to_sensor.setIdentity();
+  cfg.T_base_to_sensor.linear() = q.toRotationMatrix();
+  cfg.T_base_to_sensor.translation() = trans;
 
   if (root["probabilities"]) {
     const YAML::Node probabilities_params = root["probabilities"];
@@ -290,9 +312,8 @@ public:
     const CubloxConfig cublox_cfg = loadConfigFromYaml(config_file);
     map_frame_ = cublox_cfg.map_frame;
     tracking_frame_ = cublox_cfg.tracking_frame;
-    pointcloud_topic_ = cublox_cfg.pointcloud_topic;
-    odom_topic_ = cublox_cfg.odom_topic;
-    T_base_to_lidar_ = cublox_cfg.T_base_to_lidar;
+    T_base_to_sensor_ = cublox_cfg.T_base_to_sensor;
+    publish_input_cloud_ = cublox_cfg.publish_input_cloud;
     publish_occupancy_cloud_ = cublox_cfg.publish_occupancy_cloud;
     viz_subsample_ = cublox_cfg.viz_subsample;
     viz_max_points_ = cublox_cfg.viz_max_points;
@@ -316,18 +337,31 @@ public:
                             cublox_cfg.l_free, cublox_cfg.l_occupied);
 
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
-        odom_topic_, rclcpp::QoS(10),
+        cublox_cfg.odom_topic, rclcpp::QoS(10),
         std::bind(&CubloxDriver::odomCallback, this, std::placeholders::_1));
 
-    cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
-        pointcloud_topic_, rclcpp::SensorDataQoS(),
-        std::bind(&CubloxDriver::pointCloudCallback, this,
-                  std::placeholders::_1));
+    if (cublox_cfg.pointcloud_topic.has_value()) {
+      cloud_sub_ = create_subscription<sensor_msgs::msg::PointCloud2>(
+          cublox_cfg.pointcloud_topic.value(), rclcpp::SensorDataQoS(),
+          std::bind(&CubloxDriver::pointCloudCallback, this,
+                    std::placeholders::_1));
+    } else if (cublox_cfg.depth_topic.has_value() && cublox_cfg.K.has_value()) {
+      depth_sub_ = create_subscription<sensor_msgs::msg::Image>(
+          cublox_cfg.depth_topic.value(), rclcpp::SensorDataQoS(),
+          std::bind(&CubloxDriver::depthCallback, this, std::placeholders::_1));
+      K_ = cublox_cfg.K.value();
+    } else {
+      throw std::runtime_error("pointcloud_topic or depth_topic must be set");
+    }
 
     // Match share/cfg.rviz: Reliable + Transient Local, depth 1.
     rclcpp::QoS viz_qos(rclcpp::KeepLast(1));
     viz_qos.reliable();
     viz_qos.transient_local();
+    if (publish_input_cloud_) {
+      input_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
+          "/cublox/input_cloud", viz_qos);
+    }
     if (publish_occupancy_cloud_) {
       occupancy_cloud_pub_ = create_publisher<sensor_msgs::msg::PointCloud2>(
           "/cublox/occupancy_cloud", viz_qos);
@@ -404,16 +438,17 @@ public:
         odom->pose.pose.orientation.w, odom->pose.pose.orientation.x,
         odom->pose.pose.orientation.y, odom->pose.pose.orientation.z);
     T_odom_to_base.linear() = q.toRotationMatrix();
-    const Eigen::Isometry3f T_odom_to_lidar = T_odom_to_base * T_base_to_lidar_;
+    const Eigen::Isometry3f T_odom_to_sensor =
+        T_odom_to_base * T_base_to_sensor_;
 
     if (!buildCloudInOdomFrame(
-            *cloud, T_odom_to_lidar,
+            *cloud, T_odom_to_sensor,
             grid_->getMaxRaycastRange() * grid_->getMaxRaycastRange(), pts)) {
       return;
     }
 
     const Eigen::Vector3f robot_pos = T_odom_to_base.translation();
-    const Eigen::Vector3f sensor_origin = T_odom_to_lidar.translation();
+    const Eigen::Vector3f sensor_origin = T_odom_to_sensor.translation();
     const rclcpp::Time cloud_stamp(cloud->header.stamp);
     const bool new_cloud = !last_mapped_cloud_stamp_valid_ ||
                            cloud_stamp != last_mapped_cloud_stamp_;
@@ -462,13 +497,16 @@ public:
       return;
     }
 
-    publishOutputs(robot_pos, odom, std::move(occ_samples));
+    publishOutputs(robot_pos, odom, cloud_stamp, new_cloud, std::move(pts),
+                   std::move(occ_samples));
   }
 
 private:
   void publishOutputs(
       const Eigen::Vector3f &robot_pos,
       const nav_msgs::msg::Odometry::SharedPtr &odom,
+      const rclcpp::Time &cloud_stamp, const bool new_cloud,
+      cublox::PointCloud pts,
       std::vector<cublox::OccupancyGrid::OccupancySample> occ_samples) {
     nav_msgs::msg::Odometry odom_out = *odom;
     odom_out.header.frame_id = map_frame_;
@@ -494,6 +532,11 @@ private:
     path_out.header.stamp = odom_out.header.stamp;
     path_pub_->publish(path_out);
 
+    if (publish_input_cloud_ && input_cloud_pub_ && new_cloud &&
+        pts.rows() > 0 && !shutdown_) {
+      publishInputCloud(cloud_stamp, std::move(pts));
+    }
+
     if (publish_occupancy_cloud_ && occupancy_cloud_pub_ &&
         !occ_samples.empty() && !shutdown_) {
       publishOccupancyCloudAsync(robot_pos, std::move(occ_samples));
@@ -507,6 +550,88 @@ private:
   void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     std::lock_guard<std::mutex> data_lock(data_mutex_);
     cloud_ = msg;
+  }
+
+  void depthCallback(const sensor_msgs::msg::Image::SharedPtr msg) {
+    const float fx = K_(0, 0);
+    const float fy = K_(1, 1);
+    const float cx = K_(0, 2);
+    const float cy = K_(1, 2);
+
+    const uint32_t width = msg->width;
+    const uint32_t height = msg->height;
+    if (width == 0 || height == 0) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                           "Depth image has no width or height");
+      return;
+    }
+
+    const bool is_16bit_depth =
+        (msg->encoding == "16UC1" || msg->encoding == "mono16");
+    const bool is_32fc1 = (msg->encoding == "32FC1");
+    if (!is_16bit_depth && !is_32fc1) {
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                           "Unsupported depth encoding '%s' (expected 16UC1, "
+                           "mono16, or 32FC1)",
+                           msg->encoding.c_str());
+      return;
+    }
+
+    sensor_msgs::msg::PointCloud2 cloud_msg;
+    cloud_msg.header = msg->header;
+    cloud_msg.height = 1;
+    cloud_msg.is_dense = false;
+    sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
+    modifier.setPointCloud2FieldsByString(1, "xyz");
+    const size_t n = static_cast<size_t>(width) * static_cast<size_t>(height);
+    modifier.resize(n);
+
+    sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
+    sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
+    sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
+
+    const auto nan = std::numeric_limits<float>::quiet_NaN();
+    if (is_16bit_depth) {
+      for (uint32_t v = 0; v < height; ++v) {
+        const auto *row = reinterpret_cast<const uint16_t *>(
+            msg->data.data() + static_cast<size_t>(v) * msg->step);
+        for (uint32_t u = 0; u < width; ++u, ++iter_x, ++iter_y, ++iter_z) {
+          const uint16_t raw = row[u];
+          if (raw == 0) {
+            *iter_x = nan;
+            *iter_y = nan;
+            *iter_z = nan;
+            continue;
+          }
+          const float z = static_cast<float>(raw) * 0.001f;
+          *iter_x = (static_cast<float>(u) - cx) * z / fx;
+          *iter_y = (static_cast<float>(v) - cy) * z / fy;
+          *iter_z = z;
+        }
+      }
+    } else {
+      for (uint32_t v = 0; v < height; ++v) {
+        const auto *row = reinterpret_cast<const float *>(
+            msg->data.data() + static_cast<size_t>(v) * msg->step);
+        for (uint32_t u = 0; u < width; ++u, ++iter_x, ++iter_y, ++iter_z) {
+          const float z = row[u];
+          if (!std::isfinite(z) || z <= 0.f) {
+            *iter_x = nan;
+            *iter_y = nan;
+            *iter_z = nan;
+            continue;
+          }
+          *iter_x = (static_cast<float>(u) - cx) * z / fx;
+          *iter_y = (static_cast<float>(v) - cy) * z / fy;
+          *iter_z = z;
+        }
+      }
+    }
+
+    cloud_msg.width = static_cast<uint32_t>(n);
+    std::lock_guard<std::mutex> data_lock(data_mutex_);
+    cloud_ =
+        std::make_shared<sensor_msgs::msg::PointCloud2>(std::move(cloud_msg));
   }
 
   bool buildCloudInOdomFrame(const sensor_msgs::msg::PointCloud2 &cloud,
@@ -578,6 +703,35 @@ private:
     tf.transform.translation.z = odom.pose.pose.position.z;
     tf.transform.rotation = odom.pose.pose.orientation;
     tf_broadcaster_->sendTransform(tf);
+  }
+
+  void publishInputCloud(const rclcpp::Time &stamp, cublox::PointCloud pts) {
+    if (!input_cloud_pub_ || shutdown_) {
+      return;
+    }
+
+    sensor_msgs::msg::PointCloud2 cloud_msg;
+    cloud_msg.header.frame_id = map_frame_;
+    cloud_msg.header.stamp = stamp;
+    cloud_msg.height = 1;
+    cloud_msg.is_dense = true;
+    sensor_msgs::PointCloud2Modifier modifier(cloud_msg);
+    modifier.setPointCloud2FieldsByString(1, "xyz");
+    const size_t n = static_cast<size_t>(pts.rows());
+    modifier.resize(n);
+
+    sensor_msgs::PointCloud2Iterator<float> iter_x(cloud_msg, "x");
+    sensor_msgs::PointCloud2Iterator<float> iter_y(cloud_msg, "y");
+    sensor_msgs::PointCloud2Iterator<float> iter_z(cloud_msg, "z");
+    for (Eigen::Index i = 0; i < pts.rows();
+         ++i, ++iter_x, ++iter_y, ++iter_z) {
+      *iter_x = pts(i, 0);
+      *iter_y = pts(i, 1);
+      *iter_z = pts(i, 2);
+    }
+    cloud_msg.width = static_cast<uint32_t>(n);
+
+    input_cloud_pub_->publish(cloud_msg);
   }
 
   void publishOccupancyCloudAsync(
@@ -660,12 +814,11 @@ private:
   }
 
   std::unique_ptr<cublox::OccupancyGrid> grid_;
-  Eigen::Isometry3f T_base_to_lidar_{Eigen::Isometry3f::Identity()};
+  Eigen::Isometry3f T_base_to_sensor_{Eigen::Isometry3f::Identity()};
 
   std::string map_frame_;
   std::string tracking_frame_;
-  std::string pointcloud_topic_;
-  std::string odom_topic_;
+  Eigen::Matrix<float, 3, 3> K_ = Eigen::Matrix<float, 3, 3>::Identity();
 
   std::mutex data_mutex_;
   std::mutex grid_mutex_;
@@ -681,6 +834,7 @@ private:
   rclcpp::Time last_mapped_cloud_stamp_{0, 0, RCL_ROS_TIME};
   bool last_mapped_cloud_stamp_valid_{false};
 
+  bool publish_input_cloud_{true};
   bool publish_occupancy_cloud_{true};
   int viz_subsample_{1};
   int viz_max_points_{0};
@@ -688,8 +842,10 @@ private:
   // ROS Subscribers
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr depth_sub_;
 
   // ROS Publishers
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr input_cloud_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr
       occupancy_cloud_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
