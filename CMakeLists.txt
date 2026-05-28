@@ -21,7 +21,7 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
 endif()
 
 # Cross-TU device linking (so device functions can live in one .cu and be
-# called from another). Cheap to enable up front; very annoying to add later.
+# called from another). 
 set(CMAKE_CUDA_SEPARABLE_COMPILATION ON)
 
 add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wall>
@@ -43,9 +43,6 @@ find_package(tf2_ros REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
-# CUDAToolkit gives us the `CUDA::cudart`, `CUDA::cublas`, etc imported
-# targets without leaking absolute include paths. enable_language(CUDA)
-# above already verified nvcc is on PATH.
 find_package(CUDAToolkit REQUIRED)
 
 set(ros_deps

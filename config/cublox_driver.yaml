@@ -1,5 +1,3 @@
-# Pass this file via ROS param: config_file: <path>
-#
 # Frame used for published clouds and odometry (typically "odom").
 # RViz picks this up automatically via: ros2 launch cublox cublox.launch.py
 map_frame: odom
@@ -7,10 +5,11 @@ map_frame: odom
 tracking_frame: base_link
 pointcloud_topic: /pandar_points
 odom_topic: /applanix/lvx_client/odom
+publish_tf: true
 
 # Half-extent in voxels on each axis from the sliding window origin (see Grid docs).
 # Example [250, 250, 75] ⇒ map_size_i 501 × 501 × 151 (~37.9M cells); voxel GPU buffers alone
-# ≈723 MiB (plus CUDA overhead) on typical builds; pinned host slab staging ≈4.6 KiB.
+# ≈723 MiB (plus CUDA overhead) on typical builds.
 half_map_size:
   - 350
   - 350
@@ -22,9 +21,8 @@ origin_at_center: false # false: origin is at the bottom-left corner of the map
 # Set to null or omit to disable recenter threshold behavior.
 recenter_threshold: 4.0 # meters
 max_raycast_range: 25.0 # meters
-max_viz_radius: 25.0 # meters — occupancy cloud fetch / color scale
 
-# Static transform from base frame to lidar frame
+# Static transform from base frame to sensor frame
 base_to_sensor:
   translation: [0.98837, -0.06666, -1.37611]
   rotation:
@@ -33,6 +31,7 @@ base_to_sensor:
     z: 0.99987200
     w: 0.01599934
 
+# Log-odds parameters
 probabilities:
   hit: 0.9
   miss: 0.49
@@ -40,8 +39,9 @@ probabilities:
   max: 0.98
   free: 0.499
   occupied: 0.85
-  
+
+# Visualization parameters
 publish_occupancy_cloud: true
-publish_tf: true
 viz_subsample: 1
 viz_max_points: 1000000
+max_viz_radius: 25.0 # meters — occupancy cloud fetch / color scale

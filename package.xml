@@ -4,10 +4,10 @@
   <name>cublox</name>
   <version>0.0.1</version>
   <description>
-    CUDA-accelerated version of 3D occupancy grid mapping.
+    CUDA-accelerated ego-centric 3D occupancy grid mapping.
   </description>
   <maintainer email="spiperakis@gmail.com">drsp</maintainer>
-  <license>LGPL-3.0-or-later</license>
+  <license>GPL-3.0-or-later</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
@@ -28,11 +28,6 @@
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
-
-  <!-- CUDA toolkit. Rosdep on Ubuntu maps "cuda" to nvidia-cuda-toolkit;
-       we deliberately don't list it as <depend> because most users install
-       CUDA via NVIDIA's runfile/apt repo, not via rosdep. The CMakeLists
-       will fail loudly with a useful message if nvcc isn't found. -->
 
   <export>
     <build_type>ament_cmake</build_type>
