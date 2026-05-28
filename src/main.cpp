@@ -11,6 +11,7 @@
  * You should have received a copy of the GNU General Public License along with
  * cublox. If not, see <https://www.gnu.org/licenses/>.
  **/
+
 #include <cublox/OccupancyGrid.hpp>
 #include <cublox/utils.hpp>
 
@@ -484,9 +485,8 @@ public:
                   update_ms, recenter_ms, update_ms + recenter_ms);
 
       if (publish_occupancy_cloud_ && !shutdown_) {
-        const float fetch_r =
-            std::min(max_viz_radius_,
-                     grid_->maxHorizontalInWindowRadius(robot_pos));
+        const float fetch_r = std::min(
+            max_viz_radius_, grid_->maxHorizontalInWindowRadius(robot_pos));
         const auto t_fetch0 = std::chrono::steady_clock::now();
         occ_samples = grid_->fetchOccupancyAround(
             robot_pos, fetch_r, cublox::OccupancyGrid::VoxelState::OCCUPIED,

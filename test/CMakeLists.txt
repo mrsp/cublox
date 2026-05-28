@@ -61,5 +61,13 @@ target_link_libraries(occupancy_grid_perf_test PRIVATE
   cublox
   GTest::gtest_main)
 
+add_executable(utils_index_roundtrip_test
+  test_utils_index_roundtrip.cpp
+  test_utils_index_roundtrip.cu)
+target_link_libraries(utils_index_roundtrip_test PRIVATE
+  cublox
+  GTest::gtest_main)
+
 enable_testing()
 add_test(NAME occupancy_grid_perf COMMAND occupancy_grid_perf_test)
+add_test(NAME utils_index_roundtrip COMMAND utils_index_roundtrip_test)

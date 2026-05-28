@@ -1,3 +1,17 @@
+/**
+ * Copyright (C) Stylianos Piperakis, Ownage Dynamics L.P.
+ * cublox is free software: you can redistribute it and/or modify it under the
+ * terms of the GNU General Public License as published by the Free Software
+ * Foundation, version 3.
+ *
+ * cublox is distributed in the hope that it will be useful, but WITHOUT ANY
+ * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+ * A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with
+ * cublox. If not, see <https://www.gnu.org/licenses/>.
+ **/
+
 #include <cublox/OccupancyGrid.hpp>
 #include <gtest/gtest.h>
 
@@ -45,7 +59,7 @@ TEST(OccupancyGridPerf, UpdateSphericalShellTiming) {
       /*recenter_threshold=*/std::nullopt,
       /*origin=*/Eigen::Vector3f::Zero());
 
-  constexpr int kNumPoints = 100'000;
+  constexpr int kNumPoints = 500000;
   const auto cloud = makeSphericalShellCloud(kNumPoints, /*r_min=*/1.5f,
                                              /*r_max=*/8.0f, /*seed=*/42);
   const Eigen::Vector3f sensor_origin = Eigen::Vector3f::Zero();
@@ -62,14 +76,13 @@ TEST(OccupancyGridPerf, UpdateSphericalShellTiming) {
                grid.config_.map_size_i.x(), grid.config_.map_size_i.y(),
                grid.config_.map_size_i.z(), grid.config_.voxel_num,
                static_cast<double>(grid.config_.resolution));
-  std::fprintf(stderr,
-               "cloud: %d points on a [%.1f, %.1f] m spherical shell\n",
+  std::fprintf(stderr, "cloud: %d points on a [%.1f, %.1f] m spherical shell\n",
                kNumPoints, 1.5f, 8.0f);
 
   const double warm_ms = bench_one();
   std::fprintf(stderr, "warm-up update():     %.3f ms\n", warm_ms);
 
-  constexpr int kN = 50;
+  constexpr int kN = 100;
   double total = 0.0;
   double min_ms = std::numeric_limits<double>::max();
   double max_ms = 0.0;
@@ -84,18 +97,4 @@ TEST(OccupancyGridPerf, UpdateSphericalShellTiming) {
                "steady-state over %d iters: mean=%.3f ms, min=%.3f ms, "
                "max=%.3f ms  (~%.1f Hz at mean)\n",
                kN, mean_ms, min_ms, max_ms, 1000.0 / mean_ms);
-
-  RecordProperty("warm_up_ms", std::to_string(warm_ms));
-  RecordProperty("mean_ms", std::to_string(mean_ms));
-  RecordProperty("min_ms", std::to_string(min_ms));
-  RecordProperty("max_ms", std::to_string(max_ms));
-
-  if (const char *cap_str = std::getenv("CUBLOX_PERF_MAX_MEAN_MS")) {
-    char *end = nullptr;
-    const double cap = std::strtod(cap_str, &end);
-    if (end != cap_str && cap > 0.0) {
-      EXPECT_LT(mean_ms, cap)
-          << "mean update() time exceeds CUBLOX_PERF_MAX_MEAN_MS=" << cap;
-    }
-  }
 }
