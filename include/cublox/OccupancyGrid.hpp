@@ -11,6 +11,7 @@
  * You should have received a copy of the GNU General Public License along with
  * cublox. If not, see <https://www.gnu.org/licenses/>.
  **/
+
 #pragma once
 
 #include <Eigen/Dense>
@@ -63,14 +64,13 @@ public:
       const std::optional<VoxelState> state_filter = std::nullopt,
       const int max_results = 0) const;
 
-  // Default: 25m. Call this once during setup.
+  // Call this once during setup.
   inline void setMaxRaycastRange(const float range) {
     max_raycast_range_ = range;
   }
   inline float getMaxRaycastRange() const { return max_raycast_range_; }
 
-  // Defaults values are (p_hit=0.70, p_miss=0.40, p_min=0.12, p_max=0.97). Call
-  // this once during setup
+  // Call this once during setup
   void setLogOddsParams(const float l_hit, const float l_miss,
                         const float l_min, const float l_max,
                         const float l_free, const float l_occupied) {
@@ -100,8 +100,8 @@ public:
 private:
   bool first_run_{true};
 
-  // Buffer holds logits relative to l_unknown_ (logit(0.5) == 0). Unknown prior
-  // is stored == 0 (cudaMemset-friendly); decode with + l_unknown_.
+  // Buffer holds logits relative to l_unknown_ (e.g. logit(0.5) == 0). Unknown
+  // prior is stored == 0 (cudaMemset-friendly); decode with + l_unknown_.
   float storedToLogit(const float s) const noexcept { return s + l_unknown_; }
   bool occOccupied(const float s) const noexcept {
     return storedToLogit(s) >= l_occupied_;

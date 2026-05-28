@@ -11,6 +11,7 @@
  * You should have received a copy of the GNU General Public License along with
  * cublox. If not, see <https://www.gnu.org/licenses/>.
  **/
+
 #pragma once
 
 // Public C++ interface to the CUDA kernels.
@@ -27,17 +28,18 @@ namespace cublox {
 
 // Per-frame configuration uploaded into __constant__ memory before each
 // raycast launch. Plain aggregate (no defaulted members) — required for
-// `__constant__` storage in CUDA. 53 bytes on the GPU.
+// `__constant__` storage in CUDA. 65 bytes + 3 bytes padding = 68 bytes on the
+// GPU.
 struct RayCastCfg {
-  float3 origin;         // sensor position (world frame) - 12 bytes
-  int3 origin_i;         // sliding-window origin (global voxel index)
-  int3 map_size_i;       // voxels per axis on the local map - 12 bytes
-  int3 half_map_size_i;  // (map_size_i - 1) / 2 conceptually — see Grid - 12
-                         // bytes
-  float resolution;      // 4 bytes
-  float inv_resolution;  // 4 bytes
-  float max_range;       // rays longer than this are clipped - 4 bytes
-  int map_vox_num;       // map_size_i.x * map_size_i.y * map_size_i.z - 4 bytes
+  float3 origin;        // sensor position (world frame) - 12 bytes
+  int3 origin_i;        // sliding-window origin (global voxel index) - 12 bytes
+  int3 map_size_i;      // voxels per axis on the local map - 12 bytes
+  int3 half_map_size_i; // (map_size_i - 1) / 2 conceptually — see Grid - 12
+                        // bytes
+  float resolution;     // 4 bytes
+  float inv_resolution; // 4 bytes
+  float max_range;      // rays longer than this are clipped - 4 bytes
+  int map_vox_num;      // map_size_i.x * map_size_i.y * map_size_i.z - 4 bytes
   bool origin_at_center; // corner binning vs centered bins — see Grid - 1 byte
 };
 
@@ -98,7 +100,7 @@ struct RecenterResult {
 };
 
 // Plans slice IDs on device, clears exiting and entering slabs (or full-resets
-// `d_occ`), and writes the outcome to `h_result`. No CPU-side slice expansion.
+// `d_occ`), and writes the outcome to `h_result`.
 void launchRecenter(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
                     const RecenterCfg &cfg, int *d_slices_x, int *d_slices_y,
                     int *d_slices_z, RecenterResult *d_result,

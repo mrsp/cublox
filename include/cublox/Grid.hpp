@@ -11,6 +11,7 @@
  * You should have received a copy of the GNU General Public License along with
  * cublox. If not, see <https://www.gnu.org/licenses/>.
  **/
+
 #pragma once
 
 #include <Eigen/Dense>
@@ -36,10 +37,8 @@ public:
   Eigen::Vector3i getOriginIndex() const { return origin_i_; }
   Eigen::Vector3f getOriginPosition() const { return origin_f_; }
 
-  // Largest sphere radius [m] centered at `center` that fits in the window.
-  float maxInWindowRadius(const Eigen::Vector3f &center) const;
   // Horizontal (xy) margin only — for lidar range/fetch; z half_map is often
-  // much smaller and must not cap horizontal raycast to ~7 m.
+  // much smaller.
   float maxHorizontalInWindowRadius(const Eigen::Vector3f &center) const;
 
   struct Config {

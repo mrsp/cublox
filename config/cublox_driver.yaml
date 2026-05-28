@@ -45,3 +45,4 @@ publish_occupancy_cloud: true
 viz_subsample: 1
 viz_max_points: 1000000
 max_viz_radius: 25.0 # meters — occupancy cloud fetch / color scale
+publish_input_cloud: true

@@ -8,7 +8,7 @@ Contributions, feedback, or suggestions are highly appreciated as we continue to
 
 All heavy work runs on the GPU: raycasting, occupancy updates, and recentering. Only visualization is done on the CPU.
 
-This repository also ships a ROS 2 driver - `cublox_node` - that wires cublox to your robot. It subscribes to a point cloud and odometry, publishes an occupancy cloud and TF, and includes an RViz launch file for live visualization.
+This repository also ships a dummy ROS 2 driver - `cublox_node` - that wires cublox to your robot. It subscribes to a point cloud and odometry, publishes an occupancy cloud and TF, and includes an RViz launch file for live visualization. For better performance we need to synchronize the odometry to the point cloud received and also deskew the point cloud.
 
 **Package contents**
 
@@ -22,6 +22,7 @@ This repository also ships a ROS 2 driver - `cublox_node` - that wires cublox to
 1. Configure `config/cublox_driver.yaml`
 
 2. In your ROS 2 workspace:
+
 ```
 colcon build --packages-select cublox --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.bash 

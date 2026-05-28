@@ -11,6 +11,7 @@
  * You should have received a copy of the GNU General Public License along with
  * cublox. If not, see <https://www.gnu.org/licenses/>.
  **/
+
 #include <cublox/utils.cuh>
 
 #include <math_constants.h>
@@ -19,8 +20,8 @@ namespace cublox {
 
 __constant__ RayCastCfg c_cfg;
 
-__device__ inline bool insideSlidingWindow(const int3 &id_g, const int3 &origin_i,
-                                           const int3 &half) {
+__device__ inline bool
+insideSlidingWindow(const int3 &id_g, const int3 &origin_i, const int3 &half) {
   return abs(id_g.x - origin_i.x) <= half.x &&
          abs(id_g.y - origin_i.y) <= half.y &&
          abs(id_g.z - origin_i.z) <= half.z;
@@ -108,8 +109,8 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
     }
     const int3 id_g = make_int3(ix, iy, iz);
     if (insideSlidingWindow(id_g, c_cfg.origin_i, c_cfg.half_map_size_i)) {
-      const int h = globalIndexToHashId(id_g, c_cfg.map_size_i,
-                                        c_cfg.half_map_size_i);
+      const int h =
+          globalIndexToHashId(id_g, c_cfg.map_size_i, c_cfg.half_map_size_i);
       if (h >= 0 && h < c_cfg.map_vox_num) {
         atomicAdd(&op_cnt[h], 1);
       }
@@ -139,8 +140,8 @@ __global__ void rayCastUpdateKernel(const float *__restrict__ cloud_x,
   // Real measurements: op + hit. Range-clipped rays: op only (miss / free).
   const int3 end_g = make_int3(ex_i, ey_i, ez_i);
   if (insideSlidingWindow(end_g, c_cfg.origin_i, c_cfg.half_map_size_i)) {
-    const int h = globalIndexToHashId(end_g, c_cfg.map_size_i,
-                                      c_cfg.half_map_size_i);
+    const int h =
+        globalIndexToHashId(end_g, c_cfg.map_size_i, c_cfg.half_map_size_i);
     if (h >= 0 && h < c_cfg.map_vox_num) {
       atomicAdd(&op_cnt[h], 1);
       if (!clipped) {
@@ -379,8 +380,7 @@ __global__ void planRecenterKernel(int *__restrict__ d_slices_x,
       }
       // Entering high-side slabs: new world coords, clear stale hash data.
       for (int k = 0; k < shift_a; ++k) {
-        out_slices[n_out++] =
-            normalizeLocalSlice(half_a - k, -half_a, half_a);
+        out_slices[n_out++] = normalizeLocalSlice(half_a - k, -half_a, half_a);
       }
     } else {
       const int n_enter = -shift_a;
@@ -391,8 +391,7 @@ __global__ void planRecenterKernel(int *__restrict__ d_slices_x,
       }
       // Entering low-side slabs.
       for (int k = 0; k < n_enter; ++k) {
-        out_slices[n_out++] =
-            normalizeLocalSlice(-half_a + k, -half_a, half_a);
+        out_slices[n_out++] = normalizeLocalSlice(-half_a + k, -half_a, half_a);
       }
     }
   }
@@ -504,23 +503,19 @@ __global__ void clearRecenterSlabAxis2Kernel(float *__restrict__ occ,
 // ─────────────────────────────────────────────────────────────────────
 __constant__ OccupancyFetchCfg c_fetch_cfg;
 
-__global__ void fetchOccupancySphereKernel(const float *__restrict__ occ,
-                                           unsigned int *__restrict__ out_count,
-                                           float3 *__restrict__ out_pos,
-                                           unsigned char *__restrict__ out_state,
-                                           const unsigned int output_capacity,
-                                           const unsigned int max_results) {
+__global__ void fetchOccupancySphereKernel(
+    const float *__restrict__ occ, unsigned int *__restrict__ out_count,
+    float3 *__restrict__ out_pos, unsigned char *__restrict__ out_state,
+    const unsigned int output_capacity, const unsigned int max_results) {
   const int gz = c_fetch_cfg.gz_min + blockIdx.z;
   if (gz > c_fetch_cfg.gz_max) {
     return;
   }
 
-  const int lx =
-      static_cast<int>(threadIdx.x + blockIdx.x * blockDim.x) -
-      c_fetch_cfg.disk_radius_vox;
-  const int ly =
-      static_cast<int>(threadIdx.y + blockIdx.y * blockDim.y) -
-      c_fetch_cfg.disk_radius_vox;
+  const int lx = static_cast<int>(threadIdx.x + blockIdx.x * blockDim.x) -
+                 c_fetch_cfg.disk_radius_vox;
+  const int ly = static_cast<int>(threadIdx.y + blockIdx.y * blockDim.y) -
+                 c_fetch_cfg.disk_radius_vox;
   const int gx = c_fetch_cfg.center_g.x + lx;
   const int gy = c_fetch_cfg.center_g.y + ly;
 
@@ -573,8 +568,8 @@ void launchFetchOccupancyAround(const OccupancyFetchCfg &cfg,
                                 const unsigned int max_results,
                                 const cudaStream_t stream) {
   if (cfg.disk_radius_vox < 0 || cfg.gz_min > cfg.gz_max || d_occ == nullptr ||
-      d_out_count == nullptr || d_out_pos == nullptr || d_out_state == nullptr ||
-      output_capacity == 0) {
+      d_out_count == nullptr || d_out_pos == nullptr ||
+      d_out_state == nullptr || output_capacity == 0) {
     return;
   }
 
@@ -590,13 +585,13 @@ void launchFetchOccupancyAround(const OccupancyFetchCfg &cfg,
   constexpr int kBlock = 16;
   const dim3 block(kBlock, kBlock, 1);
   const dim3 grid((disk_diam + kBlock - 1) / kBlock,
-                (disk_diam + kBlock - 1) / kBlock, nz);
+                  (disk_diam + kBlock - 1) / kBlock, nz);
   fetchOccupancySphereKernel<<<grid, block, /*shared_mem_size=*/0, stream>>>(
       d_occ, d_out_count, d_out_pos, d_out_state, output_capacity, max_results);
 }
 
-void launchClearRecenterSlabsForAxis(float *d_occ, int *d_op_cnt, int *d_hit_cnt,
-                                     const int3 &map_size_i,
+void launchClearRecenterSlabsForAxis(float *d_occ, int *d_op_cnt,
+                                     int *d_hit_cnt, const int3 &map_size_i,
                                      const int3 &half_map_size_i,
                                      const int *d_slice_local_values,
                                      const int n_slices, const int axis,

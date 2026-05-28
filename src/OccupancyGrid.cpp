@@ -122,6 +122,7 @@ void OccupancyGrid::reset() {
   CUDA_OK(cudaMemset(d_occ_, 0, n * sizeof(float)));
   CUDA_OK(cudaMemset(d_op_cnt_, 0, n * sizeof(int)));
   CUDA_OK(cudaMemset(d_hit_cnt_, 0, n * sizeof(int)));
+  first_run_ = true;
 }
 
 void OccupancyGrid::resetVoxel(const int hash_id) {
@@ -220,8 +221,7 @@ void OccupancyGrid::update(const PointCloud &cloud,
                 config_.half_map_size_i.z());
   cfg.resolution = config_.resolution;
   cfg.inv_resolution = config_.resolution_inv;
-  cfg.max_range =
-      std::min(max_raycast_range_, maxHorizontalInWindowRadius(sensor_origin));
+  cfg.max_range = max_raycast_range_;
   cfg.map_vox_num = config_.voxel_num;
   cfg.origin_at_center = config_.origin_at_center;
 
@@ -350,7 +350,7 @@ std::vector<OccupancyGrid::OccupancySample> OccupancyGrid::fetchOccupancyAround(
     sample.position =
         Eigen::Vector3f(pos_host[i].x, pos_host[i].y, pos_host[i].z);
     sample.state = static_cast<VoxelState>(state_host[i]);
-    out.push_back(sample);
+    out.push_back(std::move(sample));
   }
   return out;
 }

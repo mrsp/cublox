@@ -11,6 +11,7 @@
  * You should have received a copy of the GNU General Public License along with
  * cublox. If not, see <https://www.gnu.org/licenses/>.
  **/
+
 #include <cublox/Grid.hpp>
 #include <cublox/utils.hpp>
 
@@ -61,18 +62,6 @@ bool Grid::inside(const Eigen::Vector3f &pos) const {
 bool Grid::inside(const Eigen::Vector3i &id_g) const {
   const Eigen::Vector3i diff = (id_g - origin_i_).cwiseAbs();
   return (diff.array() <= config_.half_map_size_i.array()).all();
-}
-
-float Grid::maxInWindowRadius(const Eigen::Vector3f &center) const {
-  Eigen::Vector3i center_g;
-  posToGlobalIndex(center, config_.resolution_inv, config_.origin_at_center,
-                   center_g);
-  const Eigen::Vector3i margin_i =
-      config_.half_map_size_i - (center_g - origin_i_).cwiseAbs();
-  if ((margin_i.array() < 0).any()) {
-    return 0.0f;
-  }
-  return static_cast<float>(margin_i.minCoeff()) * config_.resolution;
 }
 
 float Grid::maxHorizontalInWindowRadius(const Eigen::Vector3f &center) const {
