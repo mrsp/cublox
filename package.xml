@@ -6,7 +6,7 @@
   <description>
     CUDA-accelerated ego-centric 3D occupancy grid mapping.
   </description>
-  <maintainer email="spiperakis@gmail.com">drsp</maintainer>
+  <maintainer email="stpiperakis@gmail.com">drsp</maintainer>
   <license>GPL-3.0-or-later</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
